@@ -130,9 +130,14 @@ test('copy-only decrypt authenticates and quick_checks before atomic publication
   } });
   assert.equal(called, 1);
   assert.equal(result.quickCheck, 'ok'); assert.equal(result.schemaObjects, 0);
-  assert.equal(result.outputPath, f.output);
-  assert.equal(JSON.stringify(result).includes(f.directory), false);
-  assert.equal(JSON.stringify(result).includes(testKey.toString('hex')), false);
+  const canonicalOutput = await fs.realpath(f.output);
+  const canonicalDirectory = await fs.realpath(f.directory);
+  assert.equal(result.outputPath, canonicalOutput);
+  const json = JSON.stringify(result);
+  assert.equal(json.includes(JSON.stringify(f.directory).slice(1, -1)), false);
+  assert.equal(json.includes(JSON.stringify(canonicalDirectory).slice(1, -1)), false);
+  assert.equal(json.includes(JSON.stringify(canonicalOutput).slice(1, -1)), false);
+  assert.equal(json.includes(testKey.toString('hex')), false);
   assert.deepEqual(await fs.readFile(f.input), ciphertext);
   const sqlite = new DatabaseSync(f.output, { readOnly: true });
   try { assert.equal(sqlite.prepare('PRAGMA user_version').get().user_version, 1); }

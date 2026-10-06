@@ -26,7 +26,8 @@ test('discovery selects exact current identity; public JSON never reveals paths 
   assert.equal(result.databaseCount, 1); assert.equal(result.username, 'synthetic_self');
   assert.equal(result.databases[0].header.length, 32); assert.equal(result.databases[0].walBytes, 32);
   const json = JSON.stringify(result);
-  assert.equal(json.includes('synthetic_self'), false); assert.equal(json.includes(root), false);
+  assert.equal(json.includes('synthetic_self'), false); assert.equal(json.includes(JSON.stringify(root).slice(1, -1)), false);
+  assert.equal(json.includes(JSON.stringify(await fs.realpath(root)).slice(1, -1)), false);
   assert.equal(json.includes('header'), false); assert.equal(json.includes('message_0'), false);
   assert.equal(databaseDiscoverySummary(result).accountVerified, true);
 });
@@ -37,9 +38,12 @@ test('suffix/recency cannot select an account without exact provider directory b
   await assert.rejects(discoverDatabases(options), codeIs('E_DB_NOT_FOUND'));
   await assert.rejects(discoverDatabases({ ...options, accountDir: directory }), codeIs('E_DB_ACCOUNT_BINDING'));
   const result = await discoverDatabases({ ...options, currentAccount: { ...options.currentAccount, accountDirectoryName: 'synthetic_self_random' } });
-  assert.equal(result.accountDir, directory);
+  const canonicalDirectory = await fs.realpath(directory);
+  assert.equal(result.accountDir, canonicalDirectory);
+  assert.equal(JSON.stringify(result).includes(JSON.stringify(canonicalDirectory).slice(1, -1)), false);
   const byIdentityProvider = await discoverDatabases({ ...options, accountDir: directory, resolveAccountIdentity: async () => ({ username: 'synthetic_self', accountDirectoryName: 'synthetic_self_random' }) });
-  assert.equal(byIdentityProvider.accountDir, directory);
+  assert.equal(byIdentityProvider.accountDir, canonicalDirectory);
+  assert.equal(JSON.stringify(byIdentityProvider).includes(JSON.stringify(canonicalDirectory).slice(1, -1)), false);
 });
 
 test('candidate roots honor redirected Documents, registry custom paths, and in-memory config', async t => {
