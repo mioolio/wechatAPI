@@ -1,0 +1,8 @@
+node_modules/
+.npm-cache/
+data/
+artifacts/
+dist/
+*.log
+agents/*-probe.js
+agents/send-stage-observer.js

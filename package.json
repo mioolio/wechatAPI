@@ -1,0 +1,22 @@
+{
+  "name": "wxcc",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Weixin CLI with native account, contact and history reading, native text sending and WeFlow adapters",
+  "bin": {
+    "wxcc": "bin/wxcc.mjs"
+  },
+  "scripts": {
+    "start": "node bin/wxcc.mjs",
+    "doctor": "node bin/wxcc.mjs doctor",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "frida": "17.20.0",
+    "koffi": "2.16.2"
+  }
+}

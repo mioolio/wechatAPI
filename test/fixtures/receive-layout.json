@@ -1,0 +1,74 @@
+{
+  "dll": {
+    "sha256": "10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5",
+    "architecture": "x64"
+  },
+  "candidate": {
+    "rva": "0x1071440",
+    "vtableRva": "0x8fc0ec8",
+    "allocationSize": "0x70",
+    "hasBitsOffset": "0x6c",
+    "prologueBytes32": "55 41 57 41 56 41 55 41 54 56 57 53 48 83 ec 58 48 8d 6c 24 50 0f 29 75 f0 48 c7 45 e8 fe ff ff"
+  },
+  "nestedString": {
+    "allocatedSize": "0x18",
+    "vtableRva": "0x8e3d0e8",
+    "stringPointerOffset": "0x8",
+    "hasBitsOffset": "0x14",
+    "heapCapacityThreshold": 16,
+    "nativeStringLengthOffset": "0x10",
+    "nativeStringCapacityOffset": "0x18",
+    "correctedCandidate": "0x8e3c748"
+  },
+  "fields": {
+    "msgId": {
+      "offset": "0x10",
+      "hasBit": "0x1"
+    },
+    "fromUserName": {
+      "offset": "0x8",
+      "hasBit": "0x2"
+    },
+    "toUserName": {
+      "offset": "0x18",
+      "hasBit": "0x4"
+    },
+    "msgType": {
+      "offset": "0x14",
+      "hasBit": "0x8"
+    },
+    "content": {
+      "offset": "0x20",
+      "hasBit": "0x10"
+    },
+    "status": {
+      "offset": "0x28",
+      "hasBit": "0x20"
+    },
+    "imgStatus": {
+      "offset": "0x2c",
+      "hasBit": "0x40"
+    },
+    "createTime": {
+      "offset": "0x48",
+      "hasBit": "0x100"
+    },
+    "msgSource": {
+      "offset": "0x38",
+      "hasBit": "0x200"
+    },
+    "pushContent": {
+      "offset": "0x40",
+      "hasBit": "0x400"
+    },
+    "newMsgId": {
+      "offset": "0x50",
+      "hasBit": "0x800"
+    },
+    "msgSeq": {
+      "offset": "0x4c",
+      "hasBit": "0x1000"
+    }
+  },
+  "runtimeVerified": false
+}
