@@ -1,14 +1,17 @@
 # WXcc 完整命令手册
 
-本手册覆盖安装、命令语法、默认后端、原生账号与用户编号、历史查询、本机发送目标、数据库发现与解密、REPL、JSON 集成和常见错误。所有名称、编号、PID 和路径示例均为虚构；替换为自己机器的实际结果。
+本手册覆盖安装、命令语法、默认后端、原生账号与用户编号、历史查询、本地聊天副本编辑与撤销、本机发送目标、数据库发现与解密、REPL、JSON 集成和常见错误。所有名称、编号、PID 和路径示例均为虚构；替换为自己机器的实际结果。
 
-## 先理解三个编号
+## 先理解这些编号
 
 | 标识 | 来自哪里 | 用于什么 | 是否可以从演示输出直接复制 |
 | --- | --- | --- | --- |
 | 真实用户 ID，如 `wxid_demo_friend` | 当前微信业务对象 | 内部精确路由 | 完整 ID 可用，部分隐藏的展示值不可用 |
 | 用户编号 `u_0123456789abcdef` | 真实 ID 的 SHA-256 前 16 位十六进制 | `history --to`、`configure-target --to`、`send --to` | 使用本机登记且本次范围验证有效的编号 |
 | 数据库编号 `d_0123456789abcdef` | 当前本人 ID 与库的相对路径的 SHA-256 前 16 位 | `db decrypt --database` | 使用当前账号 `db list` 的编号 |
+| 副本编号 `c_0123456789abcdef0123456789abcdef` | 每次 `record import` 新建的本地副本 | `record` 的 `--copy` | 使用本机实际返回的 `copyId` |
+| 记录编号 `m_0123456789abcdef` | 导入时为副本中的每条记录生成 | `record edit --record-id` | 使用该副本 `record show` 返回的 `recordId` |
+| 修改编号 `e_0123456789abcdef0123456789abcdef` | 每次本地修改生成 | `record undo --change-id` | 使用该副本 `record edit` / `changes` 的实际 `changeId` |
 
 用户名称完整显示，供人选择。名称不是路由 ID，同名联系人不会自动选第一个。编号不是列表行号：增加或排序不重新编号。用户改名不改变 `u_`；数据库相对路径变化会改变 `d_`。编号碰撞时拒绝覆盖。
 
@@ -82,7 +85,7 @@ wxcc [全局选项] 命令 [命令参数] [全局选项]
 | `--account-dir DIR` | 当前账号发现 | `db` 明确账号目录；WeFlow native 显式账号目录 |
 | `--key-file FILE` | 未指定 | `db decrypt` 或 WeFlow native 的私有密钥文件 |
 | `--root DIR` | WeFlow 原生资源默认目录 | `weflow-native` 资源根，推荐显式配置 |
-| `--self SELF` | 原生读取自动获取 | 非原生监听和本机消息缓存的准确本人 ID |
+| `--self SELF` | 原生读取自动获取 | 非原生监听和本机消息缓存的准确本人 ID；离线 `record import --input` 必填完整本人 ID |
 | `--url URL` | WeFlow 环境配置或默认值 | `weflow-http` 本机 API |
 | `--interval MS` | 1000 | 非原生 `watch` 轮询间隔；1–2147483647 |
 
@@ -93,6 +96,8 @@ wxcc [全局选项] 命令 [命令参数] [全局选项]
 | 命令 | 默认后端 | 原生实现情况 |
 | --- | --- | --- |
 | `start`、`account`、`accounts`、`ids`、`history` | `reverse-native` | 当前账号、缓存联系人和最近个人会话历史 |
+| `record import --to` | `reverse-native` | 读取指定历史并保存为本地副本；读取能力与相应历史后端相同 |
+| `record import --input`、`record list/show/edit/changes/undo/export` | 不需要连接后端 | 完全离线操作 WXcc 私有聊天副本 |
 | `configure-target`、`send`、`send-status`、`db` | `reverse-native` | 本机单目标发送及独立数据库模块 |
 | `doctor`、`status`、`inspect` | `weflow-http` | 原生检查加 `--backend reverse-native` |
 | `list`、`contacts`、`watch` | `weflow-http` | 当前没有原生会话列表或监听；联系人用 `ids` |
@@ -107,6 +112,9 @@ wxcc [全局选项] 命令 [命令参数] [全局选项]
 .\wxcc.cmd help
 .\wxcc.cmd help start
 .\wxcc.cmd help history
+.\wxcc.cmd help record
+.\wxcc.cmd help record edit
+.\wxcc.cmd record edit --help
 .\wxcc.cmd help db decrypt
 .\wxcc.cmd history --help
 .\wxcc.cmd db decrypt --help
@@ -218,6 +226,139 @@ wxcc history USER [--limit 30] [--json]
 输出 `messages` 数组及当前账号、目标与代次核验信息。消息 `serverId`、`id`、`type`、`createTime` 等使用十进制字符串；64 位 ID 不转换为 Number。`timestamp` 为已验证可精确表示的毫秒数，`text` / `content` 为实际返回正文，发言人缺失时 `isSelf:null`，不会猜成本人。
 
 最近历史没有分页、全量导出或新消息监听。单次查询不自动保存正文。原生 `history` 不要求数据库解密；解密副本也不会自动变成 `history` 的另一个输入。
+
+## 本地聊天副本：修改、撤销与导出
+
+`record` 允许先取得指定聊天的历史，再修改保存在 WXcc `data/history-copies/` 中的本地副本。微信本机数据库、服务端记录、对方聊天及已有监听缓存均不改变。导入保留原文，每次修改和撤销都有历史；可以恢复某次修改前的内容。
+
+直接 `record import --to` 读取指定会话，默认使用 `reverse-native`。`record import --input` 完全离线；保存后，`list`、`show`、`edit`、`changes`、`undo`、`export` 都不访问微信、不加载原生宿主、不发送消息。微信未运行时也可以编辑已有副本。
+
+副本含完整原文及修改后的正文，变更日志也含修改前后的内容。默认输出 ID 脱敏不会清除正文和完整名称；这些本机副本与导出 JSON 都应留在私有目录，排除在源码、ZIP、截图及公开演示之外。
+
+### `record import`：直接取得指定聊天
+
+```text
+wxcc record import --to USER [--limit 30] [--json]
+```
+
+```powershell
+.\wxcc.cmd start
+.\wxcc.cmd ids --keyword "测试联系人" --json
+.\wxcc.cmd record import --to u_0123456789abcdef --limit 30 --json
+```
+
+使用本机登记的完整 `u_` 编号或精确完整个人会话 ID；不能用昵称、列表序号或脱敏 ID。账号及目标验证沿用 `history`，原生 `limit` 范围 1–200，默认 30；其他历史后端遵循其自身能力和限制。导入在服务内部取得未脱敏的原始历史，再建立副本，终端仍按隐私选项展示结果。
+
+每次导入创建一个全新的副本，不会合并新消息、刷新旧副本或覆盖旧修改。成功返回 `copyId`、`source:"local-history-copy"`、`localOnly:true`、`revision:0` 等信息。`copyId` 格式为 `c_` 加 32 位十六进制；后续命令必须复制自己的实际返回值。副本摘要还包括 `accountAlias`、`chatAlias`、`displayName`、`messageCount`、`activeEditCount`、`edited`、`createdAt` 和 `updatedAt`，`origin.source` 保留导入来源。
+
+### `record import`：离线导入已有历史 JSON
+
+```text
+wxcc record import --input FILE --self SELF [--to USER] [--json]
+```
+
+```powershell
+.\wxcc.cmd record import --input "D:\Private\private-history.json" --self wxid_demo_self --to wxid_demo_friend --json
+```
+
+输入必须是普通文件，内容为有效 UTF-8 JSON，最大 64 MiB，最多 10000 条消息。对象形状为 `history --no-redact --json` 的返回对象：
+
+```json
+{
+  "self": "wxid_demo_self",
+  "chatId": "wxid_demo_friend",
+  "messages": [
+    {
+      "id": "0",
+      "chatId": "wxid_demo_friend",
+      "senderId": "wxid_demo_friend",
+      "isSelf": false,
+      "type": "text",
+      "timestamp": 1791321600000,
+      "text": "虚构的原始正文"
+    }
+  ]
+}
+```
+
+`self` / `chatId` 是可选文件字段；命令行 `--self` 必须明确给出精确完整本人 ID。如果文件也有 `self`，必须一致。`--to` 支持精确完整聊天 ID 或本机已登记的 `u_` 编号；省略时从文件 `chatId` 或所有消息证明唯一聊天。所有消息须符合该本人和聊天范围，混合聊天、冲突目标、无法确认唯一聊天或脱敏 ID 都会被拒绝。离线编号解析只读取本机登记数据，不会访问微信补齐缺失编号。
+
+默认脱敏的 `history --json` 结果不能直接作为原始导入材料。需要保存完整历史时使用 `history --no-redact --json`，把文件留在私有目录。消息 `id`、`serverId` 等来源 ID 应保留十进制字符串，避免把 64 位值转成 JS Number / PowerShell `[double]`。文件导入不需要数据库密钥或原生宿主。
+
+### `record list` / `record show`
+
+```text
+wxcc record list [--json]
+wxcc record show --copy COPY [--limit 30] [--json]
+```
+
+```powershell
+.\wxcc.cmd record list --json
+.\wxcc.cmd record show --copy c_0123456789abcdef0123456789abcdef --limit 30 --json
+```
+
+`list` 不需要额外参数，以 `copies` 数组列出已有副本。`show` 返回副本摘要、当前 `revision` 及 `messages` 数组中每条记录的 `recordId`；`limit` 为 1–10000，默认 30。`recordId` 格式为 `m_` 加 16 位十六进制，由 `copyId` 和原始行号生成，在同一副本内固定，不会因修改正文或时间而变化；重新导入会生成新 `copyId` 和新 `recordId`。消息的 `source:"local-history-copy"` / `localOnly:true` 标明本地副本，`message.origin.source` 保留该消息的原始来源；当前有效修改存在时，消息和副本的 `edited` 为 true。
+
+来源消息 `id` 保持完整字符串，不会因为建立副本而重新编号。它可能重复，包括多个 `"0"`。本地 `recordId` 用于准确区分这些记录；不要把 `recordId`、来源 `id` 和 `changeId` 互换。
+
+### `record edit`
+
+```text
+wxcc record edit --copy COPY (--record-id RECORD | --message-id SOURCE_ID)
+  [--text TEXT | --text-file FILE] [--timestamp MS] [--revision N] [--json]
+```
+
+必须使用 `--record-id` 或 `--message-id` 精确选中一条记录，二者互斥。至少提供正文或 `--timestamp`；`--text` 与 `--text-file` 互斥，可与 `--timestamp` 一起使用。只允许修改正文和时间，不能改变本人、聊天、发言人身份或来源消息 ID。
+
+```powershell
+.\wxcc.cmd record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --text "本地修改示例" --revision 0 --json
+.\wxcc.cmd record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --text-file "D:\Private\replacement.txt" --revision 1 --json
+.\wxcc.cmd record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --timestamp 1791321600000 --revision 2 --json
+```
+
+空字符串正文合法，可在支持保留空参数的终端中使用 `--text ""`，或通过空的 UTF-8 `--text-file` 提供。直接正文和正文文件均须为有效 Unicode、不能包含 NUL，最多 1 MiB（1048576 UTF-8 字节）；正文文件须是有效 UTF-8。含引号、换行或长正文时推荐私有 `--text-file`。
+
+`--timestamp` 是毫秒整数，不是秒或本地时间字符串。`timestamp` 与 `revision` 均要求 0–9007199254740991 的整数（JavaScript `Number.MAX_SAFE_INTEGER`），`revision:0` 合法。建议把 `show` 返回的当前版本传入 `--revision`：若期间已有修改或撤销，旧版本会拒绝修改，避免覆盖自己尚未查看的变化。
+
+也可以使用 `--message-id "完整来源消息ID"`，按字符串精确匹配；匹配多条时拒绝，不会自动选择第一条，应改用 `show` 返回的 `recordId`。每次修改把副本 `revision` 加 1，返回 `changeId`（`e_` 加 32 位十六进制）、`recordId`、`messageId` 和副本摘要字段。原文及修改前后内容继续保留。含原文及审计的单份副本最多 64 MiB，每份副本最多 10000 次修改、20000 个总审计事件（含撤销）。每次修改会预留当前有效修改未来撤销所需的空间，达到修改次数或空间上限后，已有保存修改仍可按顺序撤销。
+
+### `record changes` / `record undo`
+
+```text
+wxcc record changes --copy COPY [--limit 30] [--json]
+wxcc record undo --copy COPY [--change-id CHANGE] [--revision N] [--json]
+```
+
+```powershell
+.\wxcc.cmd record changes --copy c_0123456789abcdef0123456789abcdef --limit 30 --json
+.\wxcc.cmd record undo --copy c_0123456789abcdef0123456789abcdef --revision 3 --json
+```
+
+`changes` 包含修改前 `before`、修改后 `after` 和撤销事件；`limit` 范围 1–10000，默认 30。变更历史同样会暴露原文，分享终端输出前应使用虚构材料。
+
+省略 `--change-id` 时，撤销最近尚未撤销的修改。也可按 `changes` 的实际 `changeId` 指定目标：
+
+```powershell
+.\wxcc.cmd record undo --copy c_0123456789abcdef0123456789abcdef --change-id e_0123456789abcdef0123456789abcdef --revision 3 --json
+```
+
+撤销目标必须是该条记录当前最新的有效修改。若先对同一记录修改 A、再修改 B，不能直接撤销 A；先撤销 B，再撤销 A。其他记录的修改不构成同一条记录的覆盖。已撤销、未知或不属于该副本的修改不能再次撤销。
+
+`--revision` 同样可保护当前版本。撤销恢复该次修改前的正文和时间，保留历史并更新副本版本；返回 `undoId`、被撤销修改的 `changeId`、`recordId`、`messageId` 和副本摘要，不会删除原始历史，也不会触及微信。可连续查看 `changes` 和执行 `undo`，恢复每条记录最初导入的内容。所有有效修改都撤销后 `edited:false`，版本和审计历史仍保留。
+
+### `record export`
+
+```text
+wxcc record export --copy COPY --output NEW_FILE [--no-redact] [--json]
+```
+
+```powershell
+.\wxcc.cmd record export --copy c_0123456789abcdef0123456789abcdef --output "D:\Private\edited-history.json" --json
+```
+
+输出当前副本内容到新的 JSON 文件，不覆盖已存在的路径；重试或导出另一版本时使用新文件名。禁止输出到微信实时 `db_storage` 目录或程序源码位置，选择自己私有的数据目录。输出最多 64 MiB；所有导出始终附带 `source:"local-history-copy"`、`localOnly`、`edited`、`revision`、`exportedAt`、`redacted` 等元数据，保留这是 WXcc 本地副本及其修改状态的标记。命令成功结果包括 `ok`、`copyId`、`revision`、`messageCount`、`edited`、`redacted` 和 `bytes`，不会把私有输出路径写到标准输出。
+
+默认沿用 `--redact true`，对文件中的 ID 脱敏；主动指定 `--no-redact` 或 `--redact false` 才关闭 ID 脱敏。完整名称与正文不会自动隐藏，因此即使脱敏导出仍是私人聊天数据。完整 ID 的导出也保留本地副本标记，不能代表微信或对方记录已更改。
 
 ## 目标配置、发送与账本
 
@@ -516,6 +657,17 @@ wxcc watch --to CHAT --self SELF [--interval 1000]
 | `E_DB_OUTPUT_PERMISSIONS` / `E_DB_CLEANUP` | 明文目录权限或清理失败 | 检查本机目录权限与残留，勿分享该目录 |
 | `E_DB_INTEGRITY` | 解密副本未过 schema / quick_check | 不把不完整副本当成功结果 |
 | `E_UNSUPPORTED` / `E_PROCESS_HOOK_DISABLED` | 当前后端能力未实现 | 原生联系人用 ids；监听选已配置的读取后端 |
+| `E_RECORD_SELF` / `E_RECORD_ACCOUNT` / `E_RECORD_CHAT` | 缺完整本人 ID、账号冲突、聊天混合/不明确或存在脱敏身份 | `help record import`；离线 `--self` 必填完整 ID，确认唯一聊天和精确目标 |
+| `E_RECORD_INPUT` / `E_RECORD_TEXT` / `E_RECORD_TEXT_FILE` | 输入不是有效 UTF-8 JSON 普通文件，文件变化/超限，正文无效、含 NUL 或超过 1 MiB | 使用稳定私有输入，检查 UTF-8、JSON、文件大小及互斥参数 |
+| `E_HISTORY_COPY_ARGUMENT` / `E_HISTORY_COPY_CHAT_MISMATCH` | 副本/记录编号、消息形状、范围、毫秒时间或版本格式无效 | `help record edit`；检查实际编号，导入消息须属于同一聊天，时间和版本使用非负安全整数 |
+| `E_HISTORY_COPY_NOT_FOUND` / `E_HISTORY_COPY_MESSAGE_NOT_FOUND` | 副本不存在或消息不属于该副本 | `record list` / `show` 获取该副本实际编号 |
+| `E_HISTORY_COPY_MESSAGE_AMBIGUOUS` | 多条来源消息 ID 相同 | 使用 `record show` 返回的唯一 `--record-id` |
+| `E_HISTORY_COPY_REVISION_CONFLICT` | 修改或撤销使用旧版本 | 重新 `record show` 并核对当前内容和版本后操作 |
+| `E_HISTORY_COPY_UNDO_NOT_FOUND` / `E_HISTORY_COPY_UNDO_ORDER` | 无有效撤销目标、已撤销或同记录存在后续修改 | `record changes`；先撤销该记录最新有效修改 |
+| `E_HISTORY_COPY_BUSY` / `E_HISTORY_COPY_STORE` / `E_HISTORY_COPY_PATH` | 副本锁定、写入失败、私有目录或文件不是安全普通路径 | 等当前操作结束，检查本机私有目录及权限；不盲目删除锁或手改副本 |
+| `E_HISTORY_COPY_CORRUPT` / `E_HISTORY_COPY_SIZE` / `E_HISTORY_COPY_COLLISION` | 副本/审计损坏、修改及预留撤销空间超过 64 MiB、修改达到 10000 次（总审计事件上限 20000）或编号碰撞 | 保留原文件，检查错误；达到修改上限后已有保存修改仍可按顺序撤销，不手改审计或覆盖现有副本继续操作 |
+| `E_RECORD_OUTPUT` / `E_RECORD_OUTPUT_SCOPE` / `E_RECORD_OUTPUT_EXISTS` | 输出无效/超限、处于源码或微信数据目录、文件已存在 | 选新的私有输出文件，置于程序和实时数据目录之外 |
+| `E_RECORD_OUTPUT_PERMISSIONS` / `E_RECORD_CLEANUP` | 导出访问权限设置失败或临时私有文件清理失败 | 检查本机目录权限与残留，避免发布或分发该目录 |
 
 ## 隐私与实际验证范围
 

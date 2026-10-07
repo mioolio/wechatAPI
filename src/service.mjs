@@ -62,6 +62,7 @@ export async function createService(options = {}, dependencies = {}) {
   let storeLoaded = false;
   let adapter;
   let databaseService;
+  let historyCopyService;
   const loadStore = async () => {
     if (typeof options.self !== 'string' || !options.self.trim()) throw new WxError('E_SELF_REQUIRED', '监听与离线缓存需要 --self <本人 wxid>，用于隔离不同账户的数据。');
     if (!storeLoaded) { await store.load(); storeLoaded = true; }
@@ -131,6 +132,17 @@ export async function createService(options = {}, dependencies = {}) {
       if (backend !== 'reverse-native') throw new WxError('E_BACKEND', 'db 使用独立原生数据库读取模块；请使用 reverse-native。');
       if (!databaseService) { const create = dependencies.createDatabaseService ?? (await import('./database-service.mjs')).createDatabaseService; databaseService = create(options); }
       return databaseService.execute(args);
+    },
+    async record(args = {}) {
+      if (!historyCopyService) {
+        const create = dependencies.createHistoryCopyService ?? (await import('./history-copy-service.mjs')).createHistoryCopyService;
+        historyCopyService = create({ ...options, backend }, {
+          ...(dependencies.historyCopyStore ? { store: dependencies.historyCopyStore } : {}),
+          ...(dependencies.historyCopyRegistry ? { registry: dependencies.historyCopyRegistry } : {}),
+          readHistory: query => this.history(query),
+        });
+      }
+      return historyCopyService.execute(args);
     },
     async doctor() {
       const raw = await (dependencies.installationDoctor ?? installationDoctor)({ includeExports: false, installPath: options['install-path'], pid: options.pid });
@@ -208,6 +220,6 @@ export async function createService(options = {}, dependencies = {}) {
       } finally { await store.flush(); }
     },
     async send(args) { if (backend === 'reverse-native') return adapterFor().send(args); throw new WxError('E_SEND_NOT_CONFIGURED', '读取后端不提供发送接口；逆向发送需显式选择 --backend reverse-native 并完成运行态验证。'); },
-    async close() { await adapter?.close?.(); await databaseService?.close?.(); if (storeLoaded) await store.flush(); },
+    async close() { await adapter?.close?.(); await databaseService?.close?.(); await historyCopyService?.close?.(); if (storeLoaded) await store.flush(); },
   };
 }

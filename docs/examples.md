@@ -1,6 +1,6 @@
 # WXcc 操作与开发示范
 
-本页给出可以逐步执行的操作流程。示例联系人“测试联系人”、`u_0123456789abcdef`、`d_0123456789abcdef`、`wxid_demo_self`、PID `12345` 与路径均为虚构占位值。先在自己的微信和当前机器获取实际编号，不直接运行占位发送命令。
+本页给出可以逐步执行的操作流程。示例联系人“测试联系人”、`u_0123456789abcdef`、`d_0123456789abcdef`、`c_0123456789abcdef0123456789abcdef`、`m_0123456789abcdef`、`e_0123456789abcdef0123456789abcdef`、`wxid_demo_self`、PID `12345` 与路径均为虚构占位值。先在自己的微信和当前机器获取实际编号，不直接运行占位发送命令。
 
 新使用者先阅读 [命令手册](commands.md)。下面普通读取示范不发送消息；包含发送的步骤会明确写出发送命令。
 
@@ -454,5 +454,94 @@ npm.cmd ci
 ```
 
 发送按接收者自己的账号和目标重新配置。原有 PID、generation、Token 和授权文件不适合迁移。若二进制不匹配或自动 key 不可用，工具应明确失败并按自己的环境继续适配，不能声称已验证所有机器。
+
+## 示例十五：本地聊天副本修改与撤销
+
+此流程修改 WXcc 私有本地副本，不发送消息。微信本机数据库、服务端和对方聊天均不改变。先打开自己的微信并登录，使用专门测试聊天取得实际编号：
+
+```powershell
+.\wxcc.cmd start
+.\wxcc.cmd account --json
+.\wxcc.cmd ids --keyword "测试联系人" --json
+.\wxcc.cmd help record
+.\wxcc.cmd record edit --help
+```
+
+下面 `Read-Host` 会等待你输入实际值，避免把演示编号当成真实目标。导入后保存真实 `copyId`，并检查每步退出码：
+
+```powershell
+$targetAlias = Read-Host "输入 ids 返回的实际 u_ 编号"
+$rawCopy = .\wxcc.cmd record import --to $targetAlias --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "导入失败，先按错误提示检查账号与目标" }
+$copy = $rawCopy | ConvertFrom-Json
+$copyId = $copy.copyId
+Write-Host "已建立本地副本：$copyId，初始版本：$($copy.revision)"
+.\wxcc.cmd record show --copy $copyId --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "查看副本失败" }
+$recordId = Read-Host "输入 show 中要修改记录的实际 m_ recordId"
+```
+
+终端显示名称和正文，选择时留意隐私。每条消息都有独立的 `recordId`，即使来源消息 `id` 都是 `"0"` 也能准确选择。只有当精确来源消息 ID 唯一时才适合 `--message-id`，重复匹配会拒绝。直接导入在服务内部保存原始未脱敏历史，每次导入都建立新副本及新 `recordId`，不会刷新上次修改；`recordId` 仅在同一副本内固定。
+
+修改一条正文，并核对实际返回的 `changeId` 和 `revision`：
+
+```powershell
+$rawEdit = .\wxcc.cmd record edit --copy $copyId --record-id $recordId --text "仅保存在本地副本的虚构修改" --revision $copy.revision --json
+if ($LASTEXITCODE -ne 0) { throw "修改失败；若版本变化，先重新 show" }
+$edit = $rawEdit | ConvertFrom-Json
+Write-Host "修改编号：$($edit.changeId)，当前版本：$($edit.revision)"
+.\wxcc.cmd record changes --copy $copyId --limit 30 --json
+.\wxcc.cmd record show --copy $copyId --limit 30 --json
+```
+
+`changes` 能查看 `before`、`after` 及撤销记录，也包含原始正文。版本冲突时先重新 `show`、确认当前内容，再决定是否用当前版本修改，不能盲目去掉 `--revision` 重试。
+
+正文含换行或引号时，将修改内容放进自己的私有 UTF-8 文件，再使用 `--text-file`。直接正文及文件均最多 1 MiB，空的 UTF-8 文件可把正文清空。只改时间时无需正文参数：
+
+```powershell
+.\wxcc.cmd record edit --copy $copyId --record-id $recordId --text-file "D:\Private\replacement.txt" --json
+.\wxcc.cmd record edit --copy $copyId --record-id $recordId --timestamp 1791321600000 --json
+```
+
+毫秒时间是虚构示例，请按自己的用途填写。`--timestamp` 与 `--revision` 都必须是 0–9007199254740991 的整数。不能修改发言人、本人、聊天身份或来源消息 ID。
+
+默认撤销最近未撤销的一次修改，可以逐步恢复修改前内容：
+
+```powershell
+.\wxcc.cmd record undo --copy $copyId --json
+.\wxcc.cmd record changes --copy $copyId --json
+.\wxcc.cmd record show --copy $copyId --json
+```
+
+也可用 `changes` 返回的实际修改编号定向撤销。如果同一条记录后面还有未撤销修改，先撤销后面的修改，再撤销前面的修改；不能跳过同记录后续修改。下面两个值需从当前实际结果复制：
+
+```powershell
+$changeId = Read-Host "输入 changes 中当前可撤销的实际 e_ changeId"
+$revision = Read-Host "输入 show 返回的当前 revision"
+.\wxcc.cmd record undo --copy $copyId --change-id $changeId --revision $revision --json
+```
+
+`undo` 恢复该次修改前的正文及时间，保留历史并更新版本。继续从后往前撤销，可以回到最初导入内容；已撤销的同一修改不能再次撤销。
+
+导出当前内容时选择尚不存在的私有文件：
+
+```powershell
+.\wxcc.cmd record export --copy $copyId --output "D:\Private\local-chat-copy.json" --json
+```
+
+输出不能覆盖已有文件，不允许写入程序源码或微信实时 `db_storage` 目录。导出默认 ID 脱敏，始终带 `localOnly`、`edited`、`revision` 等标记。姓名和正文不会自动隐藏；查看或分享文件前仍需检查内容。导出另一版本时使用新文件名，恢复副本不会自动改写之前导出的文件。
+
+### 完全离线导入自己的历史 JSON
+
+如果已经在私有目录保存了 `history --no-redact --json` 的原始结果，微信关闭时也能导入及编辑。输入须是有效 UTF-8 JSON 普通文件，最多 64 MiB、10000 条记录，并且只包含一个明确聊天。`--self` 必须是完整精确本人 ID，不是 `u_` 编号或脱敏展示值：
+
+```powershell
+.\wxcc.cmd record import --input "D:\Private\private-history.json" --self wxid_demo_self --to wxid_demo_friend --json
+.\wxcc.cmd record list --json
+```
+
+上述 `wxid_` 值须替换为自己的准确值。文件包含 `self` 时应与命令一致；省略 `--to` 时文件 `chatId` 或所有消息必须能证明唯一聊天。不能混合不同聊天，也不能导入默认脱敏的历史。离线导入可用本机已登记的 `u_` 目标，但不会连接微信重新获取联系人。
+
+离线测试可直接用 [命令手册中的虚构 JSON](commands.md#record-import离线导入已有历史-json)，保留字符串消息 ID。保存后的 `list/show/edit/changes/undo/export` 全部离线，与微信是否运行无关。`data/history-copies/` 保留原文和所有修改历史，不要手改文件绕过验证，也不要将它与导出 JSON 放进源码分发包。
 
 返回 [README](../README.md)。逐参数说明、错误表及支持边界见 [命令手册](commands.md)。

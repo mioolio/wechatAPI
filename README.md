@@ -1,6 +1,6 @@
 # WXcc
 
-Windows 微信本地 Node.js CLI / REPL。通过命令自动识别当前登录账号、获取稳定用户编号、读取指定个人会话历史；还支持本机单目标原生文字发送，以及独立的数据库发现和认证解密副本导出。
+Windows 微信本地 Node.js CLI / REPL。通过命令自动识别当前登录账号、获取稳定用户编号、读取指定个人会话历史；还支持可撤销的本地聊天副本编辑、本机单目标原生文字发送，以及独立的数据库发现和认证解密副本导出。
 
 账号、目标、PID 和数据库目录在本机运行时识别。分享程序时不需要附带原使用者的账号配置。当前原生适配范围为 **Windows x64、Node.js 24+、微信 4.1.15.13 x64**，且 `Weixin.dll` SHA-256 必须完全匹配：
 
@@ -42,6 +42,31 @@ PID `12345` 为虚构示例。用 `ids` 返回的实际 `u_` 编号读取会话�
 ```
 
 示例编号均为虚构，占位编号不能直接使用。用户编号为 `u_` 加真实 ID 的 SHA-256 前 16 位十六进制；新增联系人、排序和改昵称不会改变已有编号。原生读取会重新核验当前账号与目标，不按昵称猜测路由。`ids` 的 `complete:false` 表示已加载联系人缓存，当前不保证全量通讯录。
+
+## 本地聊天副本编辑
+
+取得指定聊天后，可修改 WXcc 保存的本地副本，并随时按修改历史撤销。先使用自己的实际用户编号导入，再复制返回的 `copyId` 和 `record show` 的 `recordId`：
+
+```powershell
+.\wxcc.cmd record import --to u_0123456789abcdef --limit 30 --json
+.\wxcc.cmd record list --json
+.\wxcc.cmd record show --copy c_0123456789abcdef0123456789abcdef --json
+.\wxcc.cmd record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --text "本地修改示例" --revision 0 --json
+.\wxcc.cmd record changes --copy c_0123456789abcdef0123456789abcdef --json
+.\wxcc.cmd record undo --copy c_0123456789abcdef0123456789abcdef --revision 1 --json
+.\wxcc.cmd record export --copy c_0123456789abcdef0123456789abcdef --output "D:\Private\history-copy.json" --json
+```
+
+上面的 `c_` / `m_` 编号也是虚构示例。编辑可通过 `--text-file` 提供 UTF-8 正文，或用 `--timestamp` 修改毫秒时间；可用 `--revision` 防止基于旧版本修改。来源消息 ID 可能重复，同一副本内固定的 `recordId` 用于精确选择，重新导入会生成新副本和新 `recordId`。`undo` 默认撤销最近未撤销的修改；同一记录按修改顺序从后往前撤销，原文和变更历史始终保留。
+
+已有 `history --no-redact --json` 的私有 UTF-8 JSON 时，也可以完全离线导入：
+
+```powershell
+.\wxcc.cmd record import --input "D:\Private\private-history.json" --self wxid_demo_self --to wxid_demo_friend --json
+.\wxcc.cmd help record edit
+```
+
+离线输入必须含完整 ID、明确本人和唯一聊天；`--self` 必填，默认脱敏历史不能用于导入。副本存放在 `data/history-copies/`。保存后所有查看、修改、撤销及导出操作均离线，不访问微信、不发送消息；微信本机数据库、服务端记录和对方聊天保持原状。导出始终标记 `localOnly`、`edited`、`revision`，默认 ID 脱敏，但名称和正文不会自动隐藏。原文、修改正文及导出文件均应留在私有位置，勿随源码分发。完整参数、限制与撤销规则见 [命令手册](docs/commands.md#本地聊天副本修改撤销与导出)，实际操作见 [示例十五](docs/examples.md#示例十五本地聊天副本修改与撤销)。
 
 ## 数据库发现与自动解密
 
@@ -91,6 +116,7 @@ PID `12345` 为虚构示例。用 `ids` 返回的实际 `u_` 编号读取会话�
 ```powershell
 .\wxcc.cmd help
 .\wxcc.cmd help history
+.\wxcc.cmd help record edit
 .\wxcc.cmd db decrypt --help
 .\wxcc.cmd help --json
 .\wxcc.cmd
@@ -105,7 +131,7 @@ PID `12345` 为虚构示例。用 `ids` 返回的实际 `u_` 编号读取会话�
 
 默认 `--redact true`：名称完整显示，真实 ID 部分隐藏，稳定编号可直接用于命令。主动使用 `--no-redact` 或 `--redact false` 才关闭 ID 脱敏，认证凭据仍隐藏。姓名、消息正文、截图及明文数据库仍可能泄露个人信息；稳定编号也可关联同一用户，公开演示建议使用测试账号与虚构材料。
 
-`data/` 中的编号映射、目标配置、宿主 Token、日志、发送账本和消息缓存都是本机私有运行数据。`artifacts/` 及手动导出的数据库也不得进入分发包。换电脑分享源码与锁文件，在接收者机器运行 `npm.cmd ci` 和 `start` 重新初始化。
+`data/` 中的编号映射、目标配置、宿主 Token、日志、发送账本、消息缓存及 `history-copies/` 中含原文和修改历史的副本都是本机私有运行数据。`artifacts/`、手动导出的数据库和聊天 JSON 也不得进入分发包。换电脑分享源码与锁文件，在接收者机器运行 `npm.cmd ci` 和 `start` 重新初始化。
 
 其他读取后端 `weflow-http`、`weflow-native`、`cache` 继续可用，配置与边界见命令手册。原生监听、原生会话列表、历史分页、媒体发送以及任意微信版本适配尚未实现。
 

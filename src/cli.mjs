@@ -11,10 +11,10 @@ export class CliError extends Error {
   }
 }
 
-const commands = new Set(['start', 'configure-target', 'db', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
+const commands = new Set(['start', 'configure-target', 'db', 'record', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
 const globalFlags = new Set(['json', 'verbose']);
 const globalValues = new Set(['pid', 'profile', 'self', 'backend', 'url', 'token-file', 'root', 'account-dir', 'key-file', 'interval', 'redact', 'install-path', 'data-root', 'timeout']);
-const localValues = new Set(['to', 'session', 'request-id', 'text', 'limit', 'seconds', 'keyword', 'database', 'input', 'output', 'key-mode']);
+const localValues = new Set(['to', 'session', 'request-id', 'text', 'limit', 'seconds', 'keyword', 'database', 'input', 'output', 'key-mode', 'copy', 'record-id', 'message-id', 'text-file', 'timestamp', 'revision', 'change-id']);
 
 export const HELP = renderHelp();
 
@@ -22,6 +22,11 @@ function positiveInteger(value, name) {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) < 1) {
     throw new CliError(`${name} 必须是正整数。`);
   }
+  return Number(value);
+}
+
+function nonnegativeInteger(value, name) {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new CliError(`${name} 必须是 0 至 9007199254740991 的整数。`);
   return Number(value);
 }
 
@@ -82,7 +87,7 @@ export function parseArgs(argv) {
     if (key === 'redact') {
       if (!['true', 'false'].includes(value)) throw new CliError('--redact 必须是 true 或 false。');
       target[key] = value === 'true';
-    } else target[key] = ['pid', 'limit', 'seconds', 'interval', 'timeout'].includes(key) ? positiveInteger(value, `--${key}`) : nonempty(value, `--${key}`);
+    } else target[key] = ['pid', 'limit', 'seconds', 'interval', 'timeout'].includes(key) ? positiveInteger(value, `--${key}`) : ['timestamp', 'revision'].includes(key) ? nonnegativeInteger(value, `--${key}`) : key === 'text' ? value : nonempty(value, `--${key}`);
   }
 
   const requestedCommand = positionals.shift() ?? null;
@@ -92,7 +97,7 @@ export function parseArgs(argv) {
     throw new CliError(`未知命令：${command}${suggestion ? `；可能是 ${suggestion}。运行 wxcc help ${suggestion}。` : '。运行 wxcc help 查看命令。'}`);
   }
   if (command === 'help') {
-    const topic = (help && requestedCommand !== 'help' && requestedCommand ? [requestedCommand, ...(requestedCommand === 'db' ? positionals.slice(0, 1) : [])] : positionals).join(' ');
+    const topic = (help && requestedCommand !== 'help' && requestedCommand ? [requestedCommand, ...(['db', 'record'].includes(requestedCommand) ? positionals.slice(0, 1) : [])] : positionals).join(' ');
     helpData(topic || undefined);
     return { command, options, args: topic ? { topic } : {} };
   }
@@ -100,11 +105,52 @@ export function parseArgs(argv) {
     if (Object.keys(values).length) throw new CliError('请先指定命令。');
     return { command, options, args: {} };
   }
-  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : command === 'history' ? ['to', 'limit'] : command === 'watch' ? ['to'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'db' ? ['database', 'input', 'output', 'key-mode'] : [];
+  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : command === 'history' ? ['to', 'limit'] : command === 'watch' ? ['to'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'db' ? ['database', 'input', 'output', 'key-mode'] : command === 'record' ? ['to', 'limit', 'input', 'output', 'copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision', 'change-id'] : [];
   for (const key of Object.keys(values)) {
     if (!allowed.includes(key)) throw new CliError(`${command} 不支持 --${key}。`);
   }
   const args = { ...values };
+  if (command === 'record') {
+    args.action = positionals.shift() ?? 'list';
+    const actionOptions = {
+      import: ['to', 'limit', 'input'], list: [], show: ['copy', 'limit'],
+      edit: ['copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision'],
+      changes: ['copy', 'limit'], undo: ['copy', 'change-id', 'revision'], export: ['copy', 'output'],
+    };
+    if (!Object.hasOwn(actionOptions, args.action)) {
+      const suggestion = suggestName(args.action, Object.keys(actionOptions));
+      throw new CliError(`未知 record 子命令：${args.action}。${suggestion ? `可能是 ${suggestion}。` : ''}运行 wxcc help record。`);
+    }
+    for (const key of Object.keys(values)) if (!actionOptions[args.action].includes(key)) throw new CliError(`record ${args.action} 不支持 --${key}。`);
+    if (args.action === 'import') {
+      if (!args.input && !args.to) throw new CliError('record import 需要 --to <用户编号> 或 --input <原始历史 JSON>。');
+      if (args.input && !options.self) throw new CliError('离线 record import --input 必须指定 --self <完整本人 ID>。');
+      if (args.input && args.limit !== undefined) throw new CliError('离线导入保存输入文件的全部记录，不接受 --limit。');
+      if (!args.input) {
+        args.limit ??= 30;
+        const maximum = (options.backend ?? 'reverse-native') === 'reverse-native' ? 200 : 10000;
+        if (args.limit > maximum) throw new CliError(`该后端的 record import --limit 最大为 ${maximum}。`);
+      }
+    } else if (args.action !== 'list') {
+      if (!/^c_[a-f0-9]{32}$/.test(args.copy ?? '')) throw new CliError('--copy 必须是 record import/list 返回的 c_ 编号。');
+    }
+    if (['show', 'changes'].includes(args.action)) {
+      args.limit ??= 30;
+      if (args.limit > 10000) throw new CliError('--limit 最大为 10000。');
+    }
+    if (args.action === 'edit') {
+      if ([args['record-id'] !== undefined, args['message-id'] !== undefined].filter(Boolean).length !== 1) throw new CliError('record edit 必须且只能指定 --record-id 或 --message-id。');
+      if (args['record-id'] !== undefined && !/^m_[a-f0-9]{16}$/.test(args['record-id'])) throw new CliError('--record-id 必须是 record show 返回的 m_ 编号。');
+      if (args.text !== undefined && args['text-file'] !== undefined) throw new CliError('--text 和 --text-file 只能选择一个。');
+      if (args.text === undefined && args['text-file'] === undefined && args.timestamp === undefined) throw new CliError('record edit 需要 --text、--text-file 或 --timestamp。');
+      if (args.text !== undefined && (!args.text.isWellFormed() || args.text.includes('\0') || Buffer.byteLength(args.text, 'utf8') > 1024 * 1024)) throw new CliError('--text 必须是有效 Unicode，无 NUL，UTF-8 不超过 1 MiB。');
+    }
+    if (args.action === 'undo' && args['change-id'] !== undefined && !/^e_[a-f0-9]{32}$/.test(args['change-id'])) throw new CliError('--change-id 必须是 record edit/changes 返回的 e_ 编号。');
+    if (args.action === 'export' && !args.output) throw new CliError('record export 需要 --output <新的私有 JSON 路径>。');
+    for (const [flag, field] of [['copy', 'copyId'], ['record-id', 'recordId'], ['message-id', 'messageId'], ['text-file', 'textFile'], ['revision', 'expectedRevision'], ['change-id', 'changeId']]) {
+      if (args[flag] !== undefined) { args[field] = args[flag]; delete args[flag]; }
+    }
+  }
   if (command === 'db') {
     args.action = positionals.shift() ?? 'status';
     if (!['list', 'status', 'decrypt'].includes(args.action)) {
@@ -137,6 +183,7 @@ export function parseArgs(argv) {
     if (command === 'history' && args.to === undefined) throw new CliError('history 需要明确指定 --to <id>。');
     if (command === 'send' && [args.to !== undefined, args.session !== undefined, args.pick === true].filter(Boolean).length !== 1) throw new CliError('send 必须且只能指定 --to、--session 或 --pick 之一。');
     if (command === 'send' && args.text === undefined) throw new CliError('send 需要明确指定 --text <正文>。');
+    if (command === 'send') nonempty(args.text, '--text');
     if (command === 'history') args.limit ??= 30;
     if (command === 'probe') args.seconds ??= 30;
     if (command === 'send' && args['request-id'] !== undefined) { args.requestId = args['request-id']; delete args['request-id']; }
@@ -254,7 +301,7 @@ export async function runCli(argv = [], dependencies = {}) {
 
   async function execute(parsed) {
     const options = { ...baseOptions, ...parsed.options };
-    if (['start', 'configure-target', 'db', 'account', 'accounts', 'history', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
+    if (['start', 'configure-target', 'db', 'record', 'account', 'accounts', 'history', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
     if (parsed.command === 'help') {
       output.write(options.json ? `${stringify(helpData(parsed.args.topic), true)}\n` : renderHelp(parsed.args.topic));
       return;
@@ -276,6 +323,7 @@ export async function runCli(argv = [], dependencies = {}) {
       case 'start': result = await client.start(parsed.args); break;
       case 'configure-target': result = await client.configureTarget(parsed.args); break;
       case 'db': result = await client.db(parsed.args); break;
+      case 'record': result = await client.record(parsed.args); break;
       case 'doctor':
       case 'status': result = await client.doctor(); break;
       case 'inspect': result = await client.inspect(); break;

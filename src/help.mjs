@@ -9,6 +9,61 @@ export const COMMAND_HELP = Object.freeze({
   accounts: { summary: '列出当前运行代次实际验证过的账户。', usage: 'accounts [--json]', examples: ['wxcc accounts --json'], notes: ['目前原生宿主只证明当前账户；complete:false 不是全盘多账号清单。'] },
   ids: { summary: '读取已加载联系人缓存，登记稳定 SHA-256 用户编号。', usage: 'ids [--keyword NAME] [--json] [--no-redact]', examples: ['wxcc ids --keyword "测试联系人"', 'wxcc ids --json'], notes: ['u_ 加真实 ID 的 SHA-256 前 16 位十六进制；新增用户不会重新编号。', '昵称只用于筛选。history/send 路由使用已登记编号或完整 ID。', 'complete:false 表示客户端已加载缓存，并非全部联系人。获取编号不授权发送。'], next: ['wxcc history --to u_0123456789abcdef --limit 30'] },
   history: { summary: '通过稳定用户编号读取指定个人会话记录。', usage: 'history --to USER [--limit 30] [--json]', examples: ['wxcc history --to u_0123456789abcdef --limit 30 --json', 'wxcc history u_0123456789abcdef --limit 10'], notes: ['默认 reverse-native；先 start，再 ids 登记目标。不需要手填本人 ID 或数据库密钥。', '目前原生读取限明确的个人会话；群聊不在已验证范围。', '返回正文可能包含隐私，ID 脱敏不会自动清除所有正文信息。'], next: ['wxcc help db'] },
+  record: {
+    summary: '将指定聊天记录保存为本地副本，离线修改、撤销并导出。',
+    usage: 'record import | list | show | edit | changes | undo | export',
+    examples: ['wxcc record import --to u_0123456789abcdef --limit 30 --json', 'wxcc help record edit', 'wxcc record list --json'],
+    notes: ['仅编辑 WXcc 私有 data/history-copies 中的副本，微信本机数据库、服务端及对方聊天均不改变。', 'import --to 默认 reverse-native 并读取指定聊天；import --input 及后续子命令全部离线，不访问微信或发送消息。', '原文与修改正文均保留，可用 changes 查看、undo 撤销。副本及导出文件包含私人聊天数据，勿发布。', 'c_32位十六进制 copyId、m_16位十六进制 recordId 和 e_32位十六进制 changeId 均使用实际返回值。'],
+    next: ['wxcc help record import', 'wxcc help record edit', 'wxcc help record undo'],
+  },
+  'record import': {
+    summary: '读取指定聊天或导入已有未脱敏 history JSON，建立新的本地副本。',
+    usage: 'record import (--to USER [--limit 30] | --input FILE --self SELF [--to USER]) [--json]',
+    examples: ['wxcc record import --to u_0123456789abcdef --limit 30 --json', 'wxcc record import --input "D:\\Private\\private-history.json" --self wxid_demo_self --to wxid_demo_friend --json'],
+    notes: ['直接读取默认 reverse-native；先 start、account、ids，使用已登记编号或精确完整聊天 ID。原生 limit 为 1–200，默认 30。', '文件导入完全离线；输入为 history --no-redact --json 的对象 {self?,chatId?,messages}，不能导入脱敏 ID 或多个聊天混合记录。', '输入须为普通、有效 UTF-8 JSON 文件，最多 64 MiB、10000 条记录；每次导入都建立新副本，不合并或刷新旧副本。', '文件导入要求 --self 明确的精确本人 ID；与文件 self 若都存在须一致，目标必须唯一并与每条消息验证一致。', '文件 --to 可用精确聊天 ID 或已登记 u_ 编号；省略时须能从文件 chatId 或所有消息证明唯一聊天。', '成功返回 copyId、source:"local-history-copy"、localOnly:true、revision:0；原始来源消息 ID 保留为完整字符串。'],
+    next: ['wxcc record list --json', 'wxcc help record show'],
+  },
+  'record list': {
+    summary: '离线列出已保存的本地聊天副本。',
+    usage: 'record list [--json]',
+    examples: ['wxcc record list --json'],
+    notes: ['不需要指定微信账号、宿主或后端；使用返回的实际 copyId 操作副本。', '本地列表及名称也可能包含隐私。'],
+    next: ['wxcc help record show'],
+  },
+  'record show': {
+    summary: '离线查看一个副本的当前记录及稳定 recordId。',
+    usage: 'record show --copy COPY [--limit 30] [--json]',
+    examples: ['wxcc record show --copy c_0123456789abcdef0123456789abcdef --limit 30 --json'],
+    notes: ['copyId 为 c_ 加 32 位十六进制；这里的编号是虚构示例。limit 为 1–10000，默认 30。', '每条记录的 m_16位十六进制 recordId 在同一副本内固定，由 copyId 和原始行号生成；重新导入会生成新副本和新 recordId。来源 id 保持字符串，可重复，包括 "0"。', '修改时优先使用 recordId；当前 revision 可用作修改与撤销的版本保护。'],
+    next: ['wxcc help record edit'],
+  },
+  'record edit': {
+    summary: '离线修改副本中一条记录的正文或毫秒时间，保留原文与变更历史。',
+    usage: 'record edit --copy COPY (--record-id RECORD | --message-id SOURCE_ID) [--text TEXT | --text-file FILE] [--timestamp MS] [--revision N] [--json]',
+    examples: ['wxcc record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --text "本地修改示例" --revision 0 --json', 'wxcc record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --text-file "D:\\Private\\replacement.txt" --json', 'wxcc record edit --copy c_0123456789abcdef0123456789abcdef --record-id m_0123456789abcdef --timestamp 1791321600000 --json'],
+    notes: ['必须指定一条记录，并至少提供正文或 timestamp；--record-id 与 --message-id 互斥，--text 与 --text-file 互斥。', '空字符串正文合法；正文不含 NUL，直接正文及有效 UTF-8 正文文件均最多 1 MiB。timestamp 使用毫秒。', 'timestamp / revision 必须为 0–9007199254740991 的整数，revision:0 合法。', '--message-id 精确匹配完整来源消息 ID；若重复则拒绝，改用 record show 返回的 recordId。', '只允许修改正文及时间，不允许改变本人、聊天、发言人身份或来源消息 ID。', '--revision 要求当前副本版本一致；每次修改 revision 加 1，返回 changeId e_32位十六进制及副本摘要字段。'],
+    next: ['wxcc help record changes', 'wxcc help record undo'],
+  },
+  'record changes': {
+    summary: '离线查看副本的修改与撤销记录，包括 before / after。',
+    usage: 'record changes --copy COPY [--limit 30] [--json]',
+    examples: ['wxcc record changes --copy c_0123456789abcdef0123456789abcdef --limit 30 --json'],
+    notes: ['limit 为 1–10000，默认 30。变更记录包含修改前后正文及时间，也包含撤销事件；原文与修改正文都属于私有数据。'],
+    next: ['wxcc help record undo'],
+  },
+  'record undo': {
+    summary: '离线撤销一条有效修改，恢复该次修改前的副本内容。',
+    usage: 'record undo --copy COPY [--change-id CHANGE] [--revision N] [--json]',
+    examples: ['wxcc record undo --copy c_0123456789abcdef0123456789abcdef --revision 1 --json', 'wxcc record undo --copy c_0123456789abcdef0123456789abcdef --change-id e_0123456789abcdef0123456789abcdef --json'],
+    notes: ['省略 change-id 时撤销最近尚未撤销的修改。', '指定目标必须是该条 record 当前最新的有效修改；不能跨越同一记录的后续修改。先撤销后续修改再撤销早期修改。', '--revision 可防止基于旧版本撤销；撤销保留历史，并更新副本版本。'],
+    next: ['wxcc help record show', 'wxcc help record export'],
+  },
+  'record export': {
+    summary: '将副本当前内容导出为带本地修改标记的新 JSON 文件。',
+    usage: 'record export --copy COPY --output NEW_FILE [--no-redact] [--json]',
+    examples: ['wxcc record export --copy c_0123456789abcdef0123456789abcdef --output "D:\\Private\\edited-history.json" --json'],
+    notes: ['输出文件不能已存在，也不能位于微信数据库目录或程序源码位置；选择新的私有文件名。', '导出 JSON 始终包含 localOnly、edited、revision 等元数据；这些标记会随导出保留。', '默认对导出 JSON 的 ID 脱敏；--no-redact 主动关闭 ID 脱敏。名称与正文不会自动隐藏，导出文件仍含隐私。'],
+  },
   'configure-target': { summary: '将明确选中的个人联系人配置为本机发送目标。', usage: 'configure-target --to USER [--json]', examples: ['wxcc configure-target --to u_0123456789abcdef --json'], notes: ['配置需要当前账号与联系人快照一致；不发送消息。', '目标配置只在本机保存，绑定本人账号和客户端版本；切换账号须重新配置。', '配置完成后仍需要经过验证的发送宿主与新的发送绑定。'], next: ['wxcc help send'] },
   send: { summary: '向当前授权且已绑定的个人会话提交一条文本。', usage: 'send (--to USER | --session STATE | --pick) --text TEXT [--request-id UNIQUE]', examples: ['wxcc send --to u_0123456789abcdef --text "命令测试" --request-id demo-001', 'wxcc send --pick --text "命令测试"'], notes: ['默认 reverse-native。必须有目标配置、已验证的发送 agent 和发送宿主。', '--pick 获取编号后等待选择，仅允许 canSend:true 的目标。', 'accepted 是内部提交，不能单独证明对方收到。超时结果 unknown 不自动重发。', '同一 request-id 不得换目标或正文；先用 send-status 检查结果。'], next: ['wxcc send-status --request-id demo-001'] },
   'send-status': { summary: '查询本机持久化的发送请求状态。', usage: 'send-status --request-id UNIQUE [--json]', examples: ['wxcc send-status --request-id demo-001 --json'], notes: ['不发送、不重试；账本中 accepted 不等于对方送达。'] },
@@ -36,7 +91,7 @@ export function suggestName(value, candidates) {
   return best && best.score <= Math.min(2, Math.max(1, Math.floor(value.length / 3))) && (sorted.length < 2 || sorted[1].score > best.score) ? best.name : null;
 }
 export function helpData(topic) {
-  if (!topic) return { name: 'wxcc', workflow: ['start', 'account', 'ids', 'history', 'db list'], defaultRedaction: true, commands: COMMAND_HELP, documentation: ['docs/commands.md', 'docs/examples.md'] };
+  if (!topic) return { name: 'wxcc', workflow: ['start', 'account', 'ids', 'history', 'record import', 'db list'], defaultRedaction: true, commands: COMMAND_HELP, documentation: ['docs/commands.md', 'docs/examples.md'] };
   if (!Object.hasOwn(COMMAND_HELP, topic)) { const suggestion = suggestName(topic, Object.keys(COMMAND_HELP)); throw new WxError('INVALID_ARGUMENT', `未知帮助主题：${topic}。${suggestion ? `可能是 ${suggestion}；运行 wxcc help ${suggestion}。` : '运行 wxcc help 查看命令。'}`); }
   return { command: topic, ...COMMAND_HELP[topic] };
 }
@@ -46,6 +101,8 @@ export function renderHelp(topic) {
   return ['wxcc — 微信本地命令 CLI', '', '快速开始：', '  wxcc start', '  wxcc account', '  wxcc ids --keyword "测试联系人"', '  wxcc history --to <u_16位十六进制编号> --limit 30', '  wxcc db list', '', '命令：', ...Object.entries(COMMAND_HELP).filter(([name]) => !name.includes(' ')).map(([name, value]) => `  ${name.padEnd(18)} ${value.summary}`), '', '帮助：wxcc help history；wxcc help db decrypt；wxcc <命令> --help；wxcc help --json', '选项可放在命令前后。--backend 选择后端；--json 输出 JSON；--redact true|false 默认 true。', '原生命令 start/account/accounts/ids/history/send/send-status/configure-target/db 默认 reverse-native。', 'doctor/status/inspect/list/contacts/watch 默认 weflow-http；原生检查加 --backend reverse-native。', '名称完整显示，ID 部分隐藏；--no-redact 主动关闭 ID 脱敏，认证密钥仍隐藏。', '环境：WXCC_WEIXIN_PATH、WXCC_CONFIG、WXCC_WEFLOW_URL、WXCC_WEFLOW_TOKEN、WXCC_WECHAT_DB_KEY。', '读取宿主 data/native-read-host.json；发送宿主 data/research-host.json；--token-file 明确指定。', '详细文档：docs/commands.md；演示：docs/examples.md。无参数进入 REPL，exit/quit 退出。', ''].join('\n');
 }
 export function errorHint(code) {
+  if (/^E_HISTORY_COPY_/.test(code)) return '运行 wxcc help record；用 record list / show 核对副本、记录编号与当前 revision，离线输入须含精确 ID 和唯一聊天。';
+  if (/^E_RECORD_/.test(code)) return '运行 wxcc help record edit；记录 ID 重复时使用 recordId，版本冲突先 record show，导出选择新的私有路径。';
   if (/^E_(?:NATIVE_READ_CONFIG|NATIVE_HOST_OFFLINE|START_)/.test(code)) return '先运行 wxcc start；用 wxcc doctor --backend reverse-native 检查版本、主进程和宿主。';
   if (/^E_(?:RECIPIENT_UNKNOWN|RECIPIENT_NOT_LOADED)/.test(code)) return '运行 wxcc ids --keyword "联系人名称"，使用本次返回的 u_ 编号。';
   if (/^E_DB_(?:KEY|CIPHER|AUTO)/.test(code)) return '运行 wxcc help db decrypt；自动密钥失败时使用私有 --key-file，切勿把密钥贴到日志或命令行。';
