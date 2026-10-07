@@ -370,8 +370,12 @@ test('byte-size limits reject an edit that would leave no room to undo, while sm
 
 test('Windows 8.3 aliases are supported after link checks without weakening junction rejection', { skip: process.platform !== 'win32' }, async t => {
   const fx = await fixture(t);
-  const { stdout } = await run('cmd.exe', ['/d', '/c', 'for %I in ("%WXCC_TEST_LONG_ROOT%") do @echo %~sI'], { env: { ...process.env, WXCC_TEST_LONG_ROOT: fx.directory }, windowsHide: true, timeout: 10000, maxBuffer: 8192 });
-  const shortPath = stdout.trim();
+  // cmd.exe parses the command itself; libuv argument quoting would insert literal backslashes.
+  const { stdout } = await run('cmd.exe', ['/d', '/u', '/c', 'for %I in ("%WXCC_TEST_LONG_ROOT%") do @echo %~fsI'], { env: { ...process.env, WXCC_TEST_LONG_ROOT: fx.directory }, encoding: 'utf16le', windowsVerbatimArguments: true, windowsHide: true, timeout: 10000, maxBuffer: 8192 });
+  const outputPath = stdout.trim();
+  const shortPath = outputPath.startsWith('"') && outputPath.endsWith('"') ? outputPath.slice(1, -1) : outputPath;
+  assert.equal((await stat(shortPath)).isDirectory(), true, 'The short-path helper must return an existing directory.');
+  assert.equal((await realpath(shortPath)).toLowerCase(), (await realpath(fx.directory)).toLowerCase(), 'The short-path helper must identify the same temporary directory.');
   if (!shortPath.includes('~')) { t.skip('This filesystem has no 8.3 alias for the temporary directory.'); return; }
   const shortStore = new HistoryCopyStore({ root: join(shortPath, 'history-copies') });
   const created = await shortStore.create({ accountId, chatId, messages: [message()] });
