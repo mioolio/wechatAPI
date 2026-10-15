@@ -1,30 +1,59 @@
-# WXcc 操作与开发示范
+# WXcc 跟做示例
 
-本页给出可以逐步执行的操作流程。示例联系人“测试联系人”、`u_0123456789abcdef`、`d_0123456789abcdef`、`c_0123456789abcdef0123456789abcdef`、`m_0123456789abcdef`、`e_0123456789abcdef0123456789abcdef`、`wxid_demo_self`、PID `12345` 与路径均为虚构占位值。先在自己的微信和当前机器获取实际编号，不直接运行占位发送命令。
+先选一个想做的事情，按其中的小步骤操作。第一次使用，先做第 1 个流程；只想看看本地编辑效果，可以直接做第 5 个离线演示。
 
-新使用者先阅读 [命令手册](commands.md)。下面普通读取示范不发送消息；包含发送的步骤会明确写出发送命令。
+| 想做什么 | 从这里开始 | 做完得到什么 |
+| --- | --- | --- |
+| 读取某位好友的历史 | [1. 第一次读取聊天](#read-first-chat) | 当前账号、目标编号和最近消息 |
+| 修改一份聊天副本，再恢复 | [2. 本地修改与撤销](#edit-local-copy) | 可追溯的本地副本和导出 JSON |
+| 准备发送一条测试消息 | [3. 准备发送](#prepare-send) | 明确目标、就绪检查和单次发送回执 |
+| 找到并解密自己的数据库 | [4. 数据库副本](#database-copy) | 单个数据库的独立明文副本 |
+| 不连接微信，练习编辑 | [5. 完全离线演示](#offline-demo) | 使用虚构消息完成一次本地编辑 |
+| 从自己的程序调用 WXcc | [6. Node.js 集成](#node-integration) | 参数数组调用和 JSON 结果 |
 
-## 示例一：从零开始读取指定聊天
+主流程使用 **PowerShell**，终端停在 WXcc 程序目录。命令返回 JSON；示例中保存到 `$targetAlias`、`$copyId` 等变量的是你本机的真实结果。按步骤在**同一个 PowerShell 终端**执行，遇到报错先停下，不跳过检查。换了终端、微信账号或主进程后，重新获取所需结果，不猜编号或沿用旧状态。
 
-在 PowerShell 进入解压后的程序目录，确保 Windows x64、Node.js 24+ 与支持的微信二进制。正常打开微信并登录自己的账号：
+完整参数查 [命令手册](commands.md)。本页末尾有 [cmd、交互模式和中断恢复](#other-terminals)。
+
+<a id="read-first-chat"></a>
+## 1. 第一次读取某位好友的聊天
+
+### 第一步：进入程序目录，准备读取
+
+先正常打开微信，登录自己的账号。当前原生适配是 Windows x64、Node.js 24+、微信 4.1.15.13 x64，并且 DLL 指纹必须匹配；安装条件见 [README](../README.md)。
+
+打开 PowerShell，输入程序文件夹的真实路径：
 
 ```powershell
-Set-Location -LiteralPath "D:\Tools\WXcc"
+Set-Location -LiteralPath (Read-Host "输入 WXcc 程序文件夹的完整路径") -ErrorAction Stop
 node --version
 npm.cmd ci
-.\wxcc.cmd start --json
+if ($LASTEXITCODE -ne 0) { throw "依赖安装失败，先处理上面的错误" }
 ```
 
-成功结果关注 `ready:true`、`accountVerified:true`、`historyAvailable:true` 和 `automaticMessagesSent:0`。`reused:true` 表示复用旧读取宿主，第一次成功启动通常为 false。宿主保持运行，CLI 返回终端不代表宿主退出。
+确认 Node 主版本至少为 24，且依赖安装成功，再启动读取：
 
-获取本人编号及想读取的联系人：
+```powershell
+.\wxcc.cmd start --json
+if ($LASTEXITCODE -ne 0) { throw "读取准备失败，先看错误提示" }
+```
+
+看到 `ready:true`，就可以继续读账号。命令返回提示符后，后台读取程序仍在运行；`reused:true` 表示复用了已有连接。
+
+如果失败，先运行 `.\wxcc.cmd doctor --backend reverse-native --json` 查看诊断，再查 `.\wxcc.cmd help start`。版本或 DLL 指纹不匹配时，需要对应版本的适配，不能修改校验值后硬用。
+
+### 第二步：确认当前账号，找到目标
 
 ```powershell
 .\wxcc.cmd account --json
-.\wxcc.cmd ids --keyword "测试联系人" --json
+if ($LASTEXITCODE -ne 0) { throw "账号读取失败" }
+
+$contactKeyword = Read-Host "输入好友的昵称或备注关键词"
+.\wxcc.cmd ids --keyword $contactKeyword --json
+if ($LASTEXITCODE -ne 0) { throw "联系人查找失败" }
 ```
 
-选择目标的完整 `alias`。下面 JSON 只是**字段示意**，不是实际获取结果，也不承诺展示 ID 的省略形式完全相同：
+先核对 `account` 的名称确实是本人，再在 `users` 中找目标。下面只是**虚构结果摘取的几个字段**，完整输出还会有其他字段：
 
 ```json
 {
@@ -33,130 +62,314 @@ npm.cmd ci
   "users": [
     {
       "alias": "u_0123456789abcdef",
-      "displayName": "测试联系人",
-      "chatId": "wxid_…",
+      "displayName": "虚构测试好友",
       "canSend": false
     }
-  ],
-  "automaticMessagesSent": 0
+  ]
 }
 ```
 
-`canSend:false` 只表示没有就绪发送绑定，不影响读取。`complete:false` 表示已加载缓存，不是全部好友。若返回同名多条，请根据自己的联系人身份明确选一个；不能自动取第一条。
-
-用实际编号读取最近 30 条：
+复制你自己结果中目标的完整 `alias`，通常是 `u_` 加 16 位十六进制字符。存在同名时先辨认清楚，不能直接取第一条。`complete:false` 表示这里是已加载的联系人缓存；`canSend:false` 不影响读取。
 
 ```powershell
-.\wxcc.cmd history --to u_0123456789abcdef --limit 30 --json
+$targetAlias = Read-Host "粘贴你明确选择的完整 u_ 编号"
 ```
 
-此流程无需 WeFlow、数据库解密或手填本人 ID。只读结果 `schemaValidated:true` / `historyAvailable:true` 可帮助判断路径是否核验成功。正文仍可能包含隐私，勿直接把真实输出贴到公开平台。
-
-## 示例二：路径、进程和帮助排错
-
-首次自动启动失败时先看专属帮助与诊断：
+### 第三步：读取最近 30 条
 
 ```powershell
-.\wxcc.cmd help start
-.\wxcc.cmd doctor --backend reverse-native --json
+.\wxcc.cmd history --to $targetAlias --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "历史读取失败" }
 ```
 
-需要明确选择安装和主进程时：
+在 `messages` 中看每条消息：`text` 是正文，`timestamp` 是毫秒时间；`isSelf:true` 表示自己发的，`false` 表示对方，`null` 表示暂时不知道发言人。没有消息时，先确认目标聊天确有历史，再按错误提示或重新选目标处理。
+
+到这里已经完成读取，不需要先解密数据库。想修改一份本地副本，继续下一个流程；`$targetAlias` 继续使用刚才选定的真实编号。
+
+<a id="edit-local-copy"></a>
+## 2. 修改一份本地聊天副本，再撤销
+
+先完成流程 1，保留同一个 PowerShell 终端和 `$targetAlias`。这里会把最近消息另存到 WXcc 的私有目录，再改那份副本。修改、撤销和导出不会改变微信本机数据库、服务端或对方聊天，也不发送消息。
+
+### 第一步：导入，记住这份副本
 
 ```powershell
-.\wxcc.cmd start --install-path "D:\Apps\Weixin" --pid 12345 --timeout 60000 --json
+$copyId = $null
+$rawCopy = .\wxcc.cmd record import --to $targetAlias --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "副本导入失败" }
+$copy = $rawCopy | ConvertFrom-Json
+$copyId = $copy.copyId
+$rawCopy
 ```
 
-PID 使用实际 `role:"main"` 的进程，不用子进程。未知微信版本、相同版本但 DLL 指纹不同，均不能通过修改 JSON 的 hash 或 RVA 强行适配。
+看 `copyId`、`messageCount`、`revision` 和 `localOnly:true`。`copyId` 就是这份副本的编号；以后查看或编辑都用它。每次 `record import` 都新建副本，重新导入不会刷新刚才那份。
 
-查看命令目录与自动化可解析帮助：
+### 第二步：查看副本，选择一条消息
 
 ```powershell
-.\wxcc.cmd help history
-.\wxcc.cmd history --help
-.\wxcc.cmd help db decrypt
-.\wxcc.cmd db decrypt --help
-.\wxcc.cmd help --json
+$rawCopyView = .\wxcc.cmd record show --copy $copyId --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "副本查看失败" }
+$rawCopyView
+$copyView = $rawCopyView | ConvertFrom-Json
+
+$recordId = Read-Host "从 messages 中复制要改那条消息的完整 recordId"
 ```
 
-帮助不会接触微信或数据库。拼写提示只建议修正，不自动执行猜测。比如 `hstory` 被拒绝后按提示输入正确 `history`。
+这次选的是 `m_` 开头的 **recordId**，不是联系人编号。它能区分同一副本中的消息，即使原始消息 `id` 重复也能准确选择。没有消息时先换一个确有历史的聊天，不能编造 `recordId`。
 
-## 示例三：REPL 连续读取
+### 第三步：改正文，核对修改前后
 
 ```powershell
-.\wxcc.cmd
+$rawEdit = .\wxcc.cmd record edit --copy $copyId --record-id $recordId --text "这是一条只存在于本地副本的演示改写" --revision $copyView.revision --json
+if ($LASTEXITCODE -ne 0) { throw "修改失败；版本冲突时先重新 show，核对后再决定" }
+$edit = $rawEdit | ConvertFrom-Json
+$rawEdit
+
+$rawChanges = .\wxcc.cmd record changes --copy $copyId --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "修改历史读取失败" }
+$changesView = $rawChanges | ConvertFrom-Json
+$rawChanges
 ```
 
-提示符后的输入示范：
+`changes` 的 `before` 是修改前，`after` 是修改后；`changeId` 是这次修改的编号。`revision` 是当前副本版本，示例直接使用实际返回值，不手写版本号。
 
-```text
-wxcc> help
-wxcc> start
-wxcc> account
-wxcc> ids --keyword "测试联系人"
-wxcc> history --to u_0123456789abcdef --limit 10
-wxcc> db list
-wxcc> help db decrypt
-wxcc> exit
-```
+正文包含复杂引号或换行时，用 `--text-file` 读取自己的 UTF-8 文件；只改时间用 `--timestamp`，单位是毫秒。具体写法可运行 `.\wxcc.cmd help record edit`。编辑只允许改正文和时间。
 
-这里不输入 `wxcc` 前缀。名称、正文和带空格的路径加引号。参数错误会报告并继续等待，不退出整个 REPL。用 `wxcc.cmd --json` 启动 REPL 可继承 JSON 输出。`exit` / `quit` 只退出客户端，宿主与微信继续运行。
-
-## 示例四：cmd 中使用
-
-在 Windows 命令提示符中：
-
-```bat
-chcp 65001
-cd /d D:\Tools\WXcc
-npm.cmd ci
-wxcc.cmd start --json
-wxcc.cmd account --json
-wxcc.cmd ids --keyword "测试联系人" --json
-wxcc.cmd history --to u_0123456789abcdef --limit 10 --json
-```
-
-cmd 中的引号和 PowerShell 不完全相同。简单文本用双引号，正文包含复杂引号、`&`、`%` 等 shell 字符时，开发脚本推荐使用下面 `execFile` 的参数数组，不拼接 shell 字符串。
-
-## 示例五：PowerShell 解析 JSON
-
-先检查退出码，再解析结果；不要把 stderr 混入 stdout：
+### 第四步：撤销刚才这次修改
 
 ```powershell
-$rawAccount = .\wxcc.cmd account --json
-if ($LASTEXITCODE -ne 0) { throw "account 读取失败" }
-$account = $rawAccount | ConvertFrom-Json
-Write-Host "当前账号名称：$($account.displayName)"
-Write-Host "本人编号：$($account.alias)"
+$rawUndo = .\wxcc.cmd record undo --copy $copyId --change-id $edit.changeId --revision $changesView.revision --json
+if ($LASTEXITCODE -ne 0) { throw "撤销失败，请重新 changes 核对顺序与版本" }
+$rawUndo
+.\wxcc.cmd record show --copy $copyId --limit 30 --json
+if ($LASTEXITCODE -ne 0) { throw "撤销后查看失败" }
+```
 
-$rawUsers = .\wxcc.cmd ids --keyword "测试联系人" --json
-if ($LASTEXITCODE -ne 0) { throw "ids 读取失败" }
-$users = $rawUsers | ConvertFrom-Json
-$users.users | Select-Object displayName, alias, canSend
+核对该消息已经恢复原文。撤销也会留下历史并增加 `revision`，不会删除修改记录。同一消息如果后来又改过，要先撤销后面的修改。省略 `--change-id` 时，撤销最近尚未撤销的一次修改。
 
-$selectedAlias = Read-Host "请输入上面明确选择的完整 u_ 编号"
-if ($selectedAlias -notmatch '^u_[a-f0-9]{16}$') { throw "编号格式错误" }
-if (@($users.users | Where-Object { $_.alias -eq $selectedAlias }).Count -ne 1) {
-    throw "编号不在本次筛选结果中"
+### 第五步：导出当前内容
+
+输入一个**尚不存在的新 JSON 文件完整路径**，放在程序目录和微信数据目录之外的私有位置，例如你专门保存个人副本的文件夹。
+
+```powershell
+$exportPath = Read-Host "输入新的私有 JSON 完整路径（程序和微信数据目录之外）"
+if (-not [IO.Path]::IsPathRooted($exportPath)) { throw "请使用完整路径" }
+if (Test-Path -LiteralPath $exportPath) { throw "文件已存在，请换新文件名" }
+.\wxcc.cmd record export --copy $copyId --output $exportPath --json
+if ($LASTEXITCODE -ne 0) { throw "导出失败，请按错误提示检查路径" }
+```
+
+看 `ok:true`、`localOnly:true`、`revision`、`redacted:true`。这个流程先撤销再导出，因此文件里是恢复后的内容；只有这一笔修改时，`edited` 会回到 `false`。如果想保留改写，应在撤销之前另选新文件名导出。
+
+默认隐藏部分身份 ID，**名称和正文仍然真实**；导出始终保留 `localOnly`、`edited`、`revision` 标记。修改副本不会自动更新已经导出的文件。`data/history-copies/` 保存原文及修改历史，也属于个人数据。
+
+<a id="prepare-send"></a>
+## 3. 准备向明确授权的测试联系人发送
+
+先完成流程 1，确认 `$targetAlias` 对应你愿意发送测试消息的那个个人联系人。这个流程分为准备、检查、发送三段；前两段不会自动发消息。**最后的发送命令单独执行。**
+
+### 第一步：在终端 A 配置目标，确认主进程
+
+```powershell
+if ($targetAlias -notmatch '^u_[a-f0-9]{16}$') { throw "请先完成流程 1，选择真实目标" }
+.\wxcc.cmd configure-target --to $targetAlias --json
+if ($LASTEXITCODE -ne 0) { throw "目标配置失败" }
+
+$rawDiagnosis = .\wxcc.cmd doctor --backend reverse-native --json
+if ($LASTEXITCODE -ne 0) { throw "诊断失败" }
+$rawDiagnosis
+$diagnosis = $rawDiagnosis | ConvertFrom-Json
+$mainProcessIdText = Read-Host "从 installation.processes 中输入 role 为 main 的实际 pid"
+if ($mainProcessIdText -notmatch '^[1-9][0-9]*$') { throw "PID 应为正整数" }
+$mainProcessId = [int]$mainProcessIdText
+if (@($diagnosis.installation.processes | Where-Object { $_.pid -eq $mainProcessId -and $_.role -eq 'main' }).Count -ne 1) {
+    throw "无法从本次诊断证明这是微信主进程，请先处理诊断结果"
 }
-
-$rawHistory = .\wxcc.cmd history --to $selectedAlias --limit 10 --json
-if ($LASTEXITCODE -ne 0) { throw "history 读取失败" }
-$history = $rawHistory | ConvertFrom-Json
-Write-Host "本次记录数：$($history.messages.Count)"
 ```
 
-该示范只显示数量，避免自动把所有正文写到终端或日志。想私下查看正文可使用 `$history.messages`，其内容仍是个人聊天数据。`serverId` 保持字符串，不转换为 `[double]` 或 JS Number。
+看配置结果的目标名称和 `configured:true`，以及诊断中的主 PID。多个主进程时明确选自己的那个，不选 `role:"child"`。
 
-不要通过把昵称结果的第一条直接发送来省掉选择。用户编号稳定，姓名仅用于识别。
+### 第二步：另开终端 B，启动发送宿主
 
-## 示例六：Node.js 用 `execFile` 调用读取
-
-将下方保存为自己开发目录的 `read-chat.mjs`。依次传入 WXcc 项目目录与已明确选择的实际用户编号：
+终端 B 不会继承终端 A 的变量，所以要重新输入程序路径和刚才核对的主 PID：
 
 ```powershell
-node .\read-chat.mjs "D:\Tools\WXcc" u_0123456789abcdef
+Set-Location -LiteralPath (Read-Host "输入同一个 WXcc 程序文件夹的完整路径") -ErrorAction Stop
+$mainProcessId = Read-Host "输入终端 A 刚才核对的微信主 PID"
+if ($mainProcessId -notmatch '^[1-9][0-9]*$') { throw "PID 应为正整数" }
+.\wxcc-native-host.cmd --pid $mainProcessId --send
 ```
+
+这个终端会持续运行。等初始化输出后回到终端 A 检查；看到初始化成功也还没有发送消息。读取和发送需要两个独立宿主，不把 `--read` 与 `--send` 放在同一次启动中。
+
+### 第三步：回到终端 A，确认发送确实就绪
+
+```powershell
+$rawRuntime = .\wxcc.cmd inspect --backend reverse-native --json
+if ($LASTEXITCODE -ne 0) { throw "发送状态读取失败" }
+$rawRuntime
+$runtime = $rawRuntime | ConvertFrom-Json
+if ($runtime.send.ready -ne $true) { throw "发送尚未就绪，请先处理 send 中的原因" }
+
+$rawSendUsers = .\wxcc.cmd ids --keyword $contactKeyword --json
+if ($LASTEXITCODE -ne 0) { throw "目标状态读取失败" }
+$rawSendUsers
+$sendUsers = $rawSendUsers | ConvertFrom-Json
+if (@($sendUsers.users | Where-Object { $_.alias -eq $targetAlias -and $_.canSend -eq $true }).Count -ne 1) {
+    throw "已选目标没有 canSend:true，不能继续发送"
+}
+```
+
+必须同时看到 **`send.ready:true`** 和所选目标的 **`canSend:true`**。顶层 `ready:true` 也可能仅表示读取可用，不能当作发送许可。检查不通过就停在这里，不能换个联系人试发。
+
+### 第四步：决定现在发送时，才执行这一块
+
+**下面会实际提交一条消息。** 先再次核对上一段输出中的目标名称。每条新消息使用新的请求 ID；这段不要当作初始化脚本反复运行。
+
+```powershell
+$requestId = "manual-" + [guid]::NewGuid().ToString("D")
+Write-Host "请保留本次请求 ID：$requestId"
+.\wxcc.cmd send --to $targetAlias --text "命令测试" --request-id $requestId --json
+```
+
+不论正常返回还是超时，后续都用**同一个**请求 ID 查状态：
+
+```powershell
+.\wxcc.cmd send-status --request-id $requestId --json
+```
+
+`accepted` 表示内部提交，不能证明对方收到或已读。超时、`unknown`、`reserved` 或查不到账本时，先核对本机账本、后台发送程序和客户端实际状态，不重新生成 ID 重发，也不把同一个 ID 换目标或正文复用。交互选择 `--pick` 和会话形式 `--session` 的规则见 `.\wxcc.cmd help send`。
+
+<a id="database-copy"></a>
+## 4. 从当前账号找到数据库，导出明文副本
+
+先完成流程 1 的读取准备。这个流程解密整个数据库副本，不是只导出刚才选中的好友。
+
+### 第一步：列出数据库，选择实际编号
+
+```powershell
+.\wxcc.cmd db list --json
+if ($LASTEXITCODE -ne 0) { throw "数据库发现失败" }
+$databaseAlias = Read-Host "从 databases 中复制你要导出的完整 d_ 编号"
+```
+
+根据 `kind`、`bytes`、`walBytes` 等元数据选择。`binding:"pending-page-auth"` 只说明目录关系匹配，还没有用当前进程的密钥证明归属。
+
+如果找不到自己的数据，先运行 `.\wxcc.cmd help db list`，按实际位置加 `--data-root`；多个同账号目录时加 `--account-dir`。重新执行列表和选择步骤，并在后续 `db decrypt` 使用同样的路径选项，不按“最近修改”猜目录。
+
+### 第二步：尝试自动取密钥并导出
+
+**自动取密钥已实现，但本机实测尚未找到有效密钥，不能把下面这条当作已验证必定成功的路径。** 有自己的私有密钥文件时，可以直接做下一步。
+
+```powershell
+$databaseOutput = Read-Host "输入新的私有 SQLite 完整路径（程序和微信数据目录之外）"
+if (-not [IO.Path]::IsPathRooted($databaseOutput)) { throw "请使用完整路径" }
+if (Test-Path -LiteralPath $databaseOutput) { throw "输出已存在，请换新文件名" }
+.\wxcc.cmd db decrypt --database $databaseAlias --output $databaseOutput --json
+```
+
+成功看 `ok:true`、`quickCheck:"ok"` 和 `profile`。只有从当前已验证进程取得候选并完成页面认证，才会报告 `accountCryptographicBinding:true`。找不到密钥、数据库尚未加载或参数不支持时会失败，按实际错误处理。
+
+### 第三步：有自己的密钥文件时手动导出
+
+先准备好自己的私有文件，再输入路径，不把密钥正文放到终端命令或聊天里。支持的文件格式见 `.\wxcc.cmd help db decrypt`：32 原始字节、64 位十六进制文本或 SQLCipher `x'64/96hex'`；不是任意长度密码。
+
+```powershell
+$privateKeyFile = Read-Host "输入自己的私有密钥文件完整路径"
+$manualDatabaseOutput = Read-Host "输入另一个尚不存在的私有 SQLite 完整路径"
+if (-not [IO.Path]::IsPathRooted($manualDatabaseOutput)) { throw "请使用完整输出路径" }
+if (Test-Path -LiteralPath $manualDatabaseOutput) { throw "输出已存在，请换新文件名" }
+.\wxcc.cmd db decrypt --database $databaseAlias --key-file $privateKeyFile --output $manualDatabaseOutput --json
+if ($LASTEXITCODE -ne 0) { throw "手动解密失败，先处理错误，不替换其他账号密钥试用" }
+```
+
+手动模式成功时 `accountCryptographicBinding:false` 是正常的：它证明密钥和库页面匹配，不证明密钥来自当前登录进程。
+
+已有自己的**加密离线副本**时，可用 `db decrypt --input` 代替 `--database`，必须搭配 `--key-file`，不需要连接微信。若副本有 WAL，要保留同目录同名的 `数据库文件名-wal` 并取得一致快照。参数和限制见 [命令手册](commands.md)。
+
+解密输出包含完整真实数据，默认 ID 脱敏不会清洗 SQLite 文件。输出不覆盖已有文件；单库及单 WAL 默认各限 256 MiB，CLI 没有提高上限的选项。持续变化或校验失败时不发布副本，不删除实时库或 WAL 来“修复”。
+
+<a id="offline-demo"></a>
+## 5. 完全离线：用两条虚构消息练习编辑
+
+这个流程不需要打开微信。先安装 Node.js 24+、在 WXcc 目录完成 `npm.cmd ci`，再逐步执行。所有身份、名称和正文均为虚构；它们是离线演示数据，可以原样使用。
+
+### 第一步：生成一份演示 JSON
+
+```powershell
+$demoInput = Join-Path ([IO.Path]::GetTempPath()) ("wxcc-demo-" + [guid]::NewGuid().ToString("N") + ".json")
+$demoJson = @'
+{
+  "self": "wxid_demo_self",
+  "chatId": "wxid_demo_friend",
+  "messages": [
+    {
+      "id": "18446744073709551615",
+      "chatId": "wxid_demo_friend",
+      "senderId": "wxid_demo_self",
+      "senderName": "虚构本人",
+      "isSelf": true,
+      "type": "1",
+      "text": "这是一条虚构原文。",
+      "timestamp": 1700000000000
+    },
+    {
+      "id": "demo-message-2",
+      "chatId": "wxid_demo_friend",
+      "senderId": null,
+      "isSelf": null,
+      "type": "1",
+      "text": "这条演示消息不知道发言人。",
+      "timestamp": 1700000001000
+    }
+  ]
+}
+'@
+[IO.File]::WriteAllText($demoInput, $demoJson, [Text.UTF8Encoding]::new($false))
+```
+
+这里 `self`、`chatId`、`senderId` 和消息 `id` 都是精确字符串。大整数 ID 也保留引号；`isSelf` 可为 `true`、`false` 或未知时的 `null`，不能把未知方向猜成本人。真实文件同样只能包含一个明确聊天。
+
+### 第二步：离线导入并查看
+
+```powershell
+$rawDemoCopy = .\wxcc.cmd record import --input $demoInput --self wxid_demo_self --to wxid_demo_friend --json
+if ($LASTEXITCODE -ne 0) { throw "演示导入失败" }
+$demoCopy = $rawDemoCopy | ConvertFrom-Json
+$demoCopyId = $demoCopy.copyId
+if ($demoCopyId -notmatch '^c_[a-f0-9]{32}$') { throw "没有取得演示 copyId" }
+
+$rawDemoView = .\wxcc.cmd record show --copy $demoCopyId --json
+if ($LASTEXITCODE -ne 0) { throw "演示查看失败" }
+$rawDemoView
+$demoView = $rawDemoView | ConvertFrom-Json
+```
+
+看 `messageCount:2` 和 `localOnly:true`。离线文件来源标记为 `file-history-unverified`，不会因为导入就变成微信已验证记录。
+
+### 第三步：准确找到演示原文并修改
+
+这里只按 JSON 中我们明确写入的虚构消息 ID 选择，`recordId` 仍从刚刚生成的副本读取：
+
+```powershell
+$demoMatches = @($demoView.messages | Where-Object { $_.id -eq "18446744073709551615" })
+if ($demoMatches.Count -ne 1) { throw "演示消息没有唯一匹配，请重新核对 show" }
+$demoRecordId = $demoMatches[0].recordId
+
+$rawDemoEdit = .\wxcc.cmd record edit --copy $demoCopyId --record-id $demoRecordId --text "演示：原文已在本地副本中改写。" --revision $demoView.revision --json
+if ($LASTEXITCODE -ne 0) { throw "演示修改失败" }
+.\wxcc.cmd record show --copy $demoCopyId --json
+if ($LASTEXITCODE -ne 0) { throw "修改后查看失败" }
+```
+
+核对正文已改变，且 `edited:true`。练习完成；需要撤销或导出时，按流程 2 的对应步骤操作这份 `$demoCopyId`，重新读取当前 `revision`。不要把流程 2 中另一份副本的变量混进来。
+
+真实离线导入需要完整本人 ID 和原始历史 JSON；默认脱敏的 `history` 输出不能拿来导入。保存后的 `list/show/edit/changes/undo/export` 都离线，不访问微信。
+
+<a id="node-integration"></a>
+## 6. 开发者：用 Node.js 读取并解析 JSON
+
+把下面保存为自己开发目录中的 `read-chat.mjs`。它启动读取、确认所选编号在当前联系人缓存中，再读取历史；最终只打印摘要，不打印全部正文。
 
 ```javascript
 import { execFile } from 'node:child_process';
@@ -164,11 +377,12 @@ import { promisify } from 'node:util';
 import { resolve, join } from 'node:path';
 
 const executeFile = promisify(execFile);
-const project = resolve(process.argv[2] ?? '.');
+const projectArgument = process.argv[2];
 const targetAlias = process.argv[3];
-if (!/^u_[a-f0-9]{16}$/.test(targetAlias ?? '')) {
-  throw new Error('传入自己明确选择的完整 u_ 编号');
+if (!projectArgument || !/^u_[a-f0-9]{16}$/.test(targetAlias ?? '')) {
+  throw new Error('请传入 WXcc 目录和自己明确选择的完整 u_ 编号');
 }
+const project = resolve(projectArgument);
 
 async function wxcc(args) {
   const { stdout } = await executeFile(
@@ -179,369 +393,86 @@ async function wxcc(args) {
   return JSON.parse(stdout);
 }
 
-await wxcc(['start']);
-const account = await wxcc(['account']);
-const contacts = await wxcc(['ids']);
-if (!contacts.users.some(user => user.alias === targetAlias)) {
-  throw new Error('所选编号不在当前已验证的联系人缓存中');
-}
-const history = await wxcc(['history', '--to', targetAlias, '--limit', '30']);
-
-console.log(JSON.stringify({
-  accountAlias: account.alias,
-  targetAlias,
-  messageCount: history.messages.length,
-  schemaValidated: history.schemaValidated,
-  automaticMessagesSent: history.automaticMessagesSent,
-}, null, 2));
-```
-
-这里传入 Node 可执行文件及参数数组，没有启用 shell，路径、昵称与正文不作为 shell 代码解释。Node CLI 失败会拒绝 Promise，调用方应捕获并报告 redacted stderr；不能把超时自动重试模板复用于发送。此脚本只显示结果摘要，不保存正文。
-
-JSON 输出不保证所有消息字段都有值；缺失发言人时 `isSelf` 可能为 null，serverId 可能为 `"0"`。消息去重方案应结合实际业务来源，不能把 `Number(serverId)` 当唯一键。
-
-## 示例七：发现当前本人数据库
-
-先启动只读能力，列出元数据：
-
-```powershell
-.\wxcc.cmd start --json
-.\wxcc.cmd db list --json
-.\wxcc.cmd db status --json
-```
-
-关注数据库条目的 `alias`、`kind`、`bytes`、`walBytes`。`binding:"pending-page-auth"` 表示目录关系匹配，尚未通过当前进程密钥证明文件归属。这时不要声称已经完成自动解密。
-
-如果微信数据不在默认 Documents：
-
-```powershell
-.\wxcc.cmd db list --data-root "D:\WechatData\xwechat_files" --json
-```
-
-多个同账号目录或备份产生歧义时明确目录：
-
-```powershell
-.\wxcc.cmd db list --data-root "D:\WechatData\xwechat_files" --account-dir "D:\WechatData\xwechat_files\wxid_demo_self_demo" --json
-```
-
-不要按“最近修改”自动挑选其他账号，也不要在公开截图中展开真实路径。示例目录名须替换为当前本人实际目录。
-
-## 示例八：自动获取密钥并导出副本
-
-选用刚才 `db list` 的实际编号，把输出放在程序和实时库目录之外：
-
-```powershell
-.\wxcc.cmd db decrypt --database d_0123456789abcdef --output "D:\Private\session-copy.sqlite" --json
-```
-
-成功应包括 `ok:true`、`quickCheck:"ok"`、支持的 `profile`、页数与 WAL 摘要。只有从当前已验证微信进程读到候选并完成认证时，才有 `accountCryptographicBinding:true`、`binding:"current-process-page-auth"`。
-
-自动模式只读内存、有限扫描，不会打印 key 或保存 keyfile。候选未发现、DB 未加载、加密参数不受支持、权限不足或账号变化均可能失败；失败不代表可以用其他账号 key 或修改校验强行继续。
-
-输出包含完整真实数据，`--redact true` 不会清洗 SQLite 副本。不要把该目录设为项目分发目录，也不要把副本录屏或上传。
-
-## 示例九：私有密钥文件与离线导出
-
-如果有自己的私有 keyfile：
-
-```powershell
-.\wxcc.cmd db decrypt --database d_0123456789abcdef --key-file "D:\Private\db-key.txt" --output "D:\Private\session-copy-manual.sqlite" --json
-```
-
-文件内容格式见 [密钥文件说明](commands.md#db-decrypt自己的密钥文件)。不要执行把真实 key 放进命令行或聊天窗口的命令。本工具支持 32 字节 key、64 位十六进制文本和 SQLCipher x'64/96hex'，不是任意长度密码导入。
-
-有自己的加密离线副本时无需启动宿主：
-
-```powershell
-.\wxcc.cmd db decrypt --input "D:\Private\Encrypted\session.db" --key-file "D:\Private\db-key.txt" --key-mode raw --output "D:\Private\Offline\session-copy.sqlite" --json
-```
-
-手动模式只证明 key 与库页面匹配，`accountCryptographicBinding:false` 不代表解密失败。需要尝试 PBKDF2 模式时显式 `--key-mode passphrase` 或 `auto`；它仍要求 32 字节材料。
-
-如果原加密副本有 WAL，需要保留同目录同名 `session.db-wal` 并取得一致快照。不要丢掉 WAL 后把缺失的最近消息误判为不存在。模块只导出已提交事务，校验失败拒绝发布。
-
-输出不能覆盖，第二次导出选新文件名。当前单个主库或 WAL 默认 256 MiB 上限，CLI 没有提高上限选项。持续变化时待客户端事务完成后重试，不删除实时侧文件。
-
-## 示例十：只读查看解密副本结构
-
-将下方保存为私有开发目录的 `inspect-copy.mjs`。它只显示表数量、表名和 SQLite quick_check，不打印消息正文：
-
-```powershell
-node .\inspect-copy.mjs "D:\Private\session-copy.sqlite"
-```
-
-```javascript
-import { DatabaseSync } from 'node:sqlite';
-import { resolve } from 'node:path';
-
-if (!process.argv[2]) throw new Error('传入自己的明文副本路径');
-const db = new DatabaseSync(resolve(process.argv[2]), {
-  readOnly: true,
-  enableExtensionLoading: false,
-});
 try {
-  db.exec('PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;');
-  const tables = db.prepare(
-    "SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name",
-  ).all();
-  const check = db.prepare('PRAGMA quick_check').all();
-  console.log(JSON.stringify({ tables, check }, null, 2));
-} finally {
-  db.close();
-}
-```
-
-使用自己已完成认证的明文副本，不指向实时加密库。不同客户端版本的表与列可变化，当前没有统一 SQL 聊天导出接口；不要猜测某列就是精确的业务用户 ID。表名也可能含个人标识，分享前检查。
-
-## 示例十一：配置并向自己授权的测试联系人发送
-
-此流程包含实际发送。先明确自己授权的一个个人目标，在本机完成配置；如果当前只需要读取，停在其他示例即可。
-
-```powershell
-.\wxcc.cmd start --json
-.\wxcc.cmd account --json
-.\wxcc.cmd ids --keyword "测试联系人" --json
-.\wxcc.cmd configure-target --to u_0123456789abcdef --json
-.\wxcc.cmd doctor --backend reverse-native --json
-```
-
-把主 PID 替换为当前实际值，在一个终端启动独立发送宿主：
-
-```powershell
-.\wxcc-native-host.cmd --pid 12345 --send
-```
-
-初始化不发消息。在另一终端检查 `send.ready:true`，而非只看顶层 ready：
-
-```powershell
-.\wxcc.cmd inspect --backend reverse-native --json
-.\wxcc.cmd ids --keyword "测试联系人" --json
-```
-
-仅明确配置的目标应为 `canSend:true`。如果 false，查看错误，不自动换目标或去掉验证。发送一条新的示范消息：
-
-```powershell
-.\wxcc.cmd send --to u_0123456789abcdef --text "命令测试" --request-id demo-001 --json
-.\wxcc.cmd send-status --request-id demo-001 --json
-```
-
-`demo-001` 是示范，实际每条新消息使用新的请求 ID。即使看到 accepted，也要对方回复或其他独立证据才能确认抵达，不能把内部提交回执当作已读。
-
-### 交互选择或取消
-
-```powershell
-.\wxcc.cmd send --pick --text "命令测试" --request-id demo-002
-```
-
-命令显示列表后输入实际 `u_`；选择不在本次列表中或 `canSend:false` 会拒绝。输入 `cancel` 可验证取消路径，不发送。
-
-### 按绑定内部会话状态发送
-
-```powershell
-.\wxcc.cmd send --session u_0123456789abcdef --text "命令测试" --request-id demo-003 --json
-```
-
-三种目标形式互斥，不能同时加 --to 和 --session。用户编号解析为当前绑定内部会话，不使用假的数字状态 ID。
-
-## 示例十二：Node.js 发送一次并保留请求状态
-
-下面是开发集成示意。保存为 `send-once.mjs`，仅在本机已配置的授权测试联系人及发送宿主就绪后使用。它通过私有状态文件区分首次请求与复查；已有状态时只查账本，不重复发送。
-
-```powershell
-node .\send-once.mjs "D:\Tools\WXcc" u_0123456789abcdef "D:\Private\send-demo-state.json"
-```
-
-```javascript
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { resolve, join, dirname } from 'node:path';
-import { readFile, mkdir, open } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-
-const executeFile = promisify(execFile);
-const project = resolve(process.argv[2] ?? '.');
-const alias = process.argv[3];
-const stateArgument = process.argv[4];
-if (!/^u_[a-f0-9]{16}$/.test(alias ?? '') || !stateArgument) {
-  throw new Error('传入已授权编号和私有状态文件路径');
-}
-const stateFile = resolve(stateArgument);
-
-async function wxcc(args) {
-  const { stdout } = await executeFile(
-    process.execPath,
-    [join(project, 'bin', 'wxcc.mjs'), ...args, '--json'],
-    { cwd: project, windowsHide: true, timeout: 90000, maxBuffer: 1024 * 1024 },
-  );
-  return JSON.parse(stdout);
-}
-
-let previous;
-try { previous = JSON.parse(await readFile(stateFile, 'utf8')); }
-catch (error) { if (error.code !== 'ENOENT') throw error; }
-if (previous) {
-  if (previous.alias !== alias || !previous.requestId) {
-    throw new Error('私有状态与本次目标不一致，不能复用');
+  await wxcc(['start']);
+  const account = await wxcc(['account']);
+  const contacts = await wxcc(['ids']);
+  if (!contacts.users.some(user => user.alias === targetAlias)) {
+    throw new Error('所选编号不在当前已验证的联系人缓存中');
   }
-  console.log(JSON.stringify(await wxcc([
-    'send-status', '--request-id', previous.requestId,
-  ]), null, 2));
-} else {
-  const runtime = await wxcc(['inspect', '--backend', 'reverse-native']);
-  const users = await wxcc(['ids']);
-  if (runtime.send?.ready !== true ||
-      !users.users.some(user => user.alias === alias && user.canSend === true)) {
-    throw new Error('本机授权目标或发送宿主未就绪');
-  }
-  const requestId = `demo-${randomUUID()}`;
-  await mkdir(dirname(stateFile), { recursive: true });
-  const file = await open(stateFile, 'wx', 0o600);
-  try {
-    await file.writeFile(JSON.stringify({ requestId, alias, status: 'pending' }));
-    await file.sync();
-  } finally { await file.close(); }
-
-  try {
-    const receipt = await wxcc([
-      'send', '--to', alias, '--text', '命令测试', '--request-id', requestId,
-    ]);
-    console.log(JSON.stringify(receipt, null, 2));
-  } catch {
-    // 超时可能已提交；保留状态文件，下次仅查相同请求，不自动重发。
-    console.error(`发送结果需核对，保留请求 ID：${requestId}`);
-    process.exitCode = 1;
-  }
+  const history = await wxcc(['history', '--to', targetAlias, '--limit', '30']);
+  console.log(JSON.stringify({
+    accountAlias: account.alias,
+    targetAlias,
+    messageCount: history.messages.length,
+    schemaValidated: history.schemaValidated,
+    automaticMessagesSent: history.automaticMessagesSent,
+  }, null, 2));
+} catch (error) {
+  console.error(error.stderr?.trim() || error.message);
+  process.exitCode = 1;
 }
 ```
 
-调用方超时也不能保证 WXcc / 原生任务已取消。私有状态文件、CLI 发送账本和客户端实际状态需一起核对。不存在账本或 pending 不是重发许可；不要删除状态文件再运行来“自动恢复”。Windows 的 `0o600` 不能替代目录 ACL，状态目录仍需使用自己的私有位置。
-
-## 示例十三：已有 WeFlow 后端监听
-
-仅在自己的 WeFlow 本机 API 配置完成时：
+在保存脚本的开发目录打开 PowerShell，使用流程 1 选定的实际编号：
 
 ```powershell
-.\wxcc.cmd watch --backend weflow-http --to wxid_demo_friend --self wxid_demo_self --token-file "D:\Private\weflow-token.txt" --interval 1000
+node .\read-chat.mjs (Read-Host "输入 WXcc 程序文件夹的完整路径") (Read-Host "输入明确选择的实际 u_ 编号")
 ```
 
-使用准确完整会话 ID 和本人 ID，HTTP 后端不会自动解析 `u_`。Token 文件是 API Token 文本，不是原生宿主描述。输出为 NDJSON，Ctrl+C 停止监听；监听会写入本机账号隔离消息缓存。reverse-native watch 尚未实现，不要在公开演示中称已支持原生实时接收。
+这里调用的是 Node 可执行文件和参数数组，没有启用 shell；路径或正文不会被拼成 shell 代码。先检查进程是否成功退出，再解析 stdout；不要把 stderr 合并进 JSON。`execFile` 的失败会进入 `catch`，CLI 自己的 stderr 默认脱敏。
 
-## 示例十四：公开演示与交给另一台电脑
+消息 `serverId` 等 64 位 ID 保留字符串，不转为 Number 或 `[double]`；`"0"` 可能重复，不能直接当唯一键。`isSelf:null` 表示未知，不应按“不是 true 就是对方”来判断。原生历史返回的 `schemaValidated:true`、`historyAvailable:true` 表示读取结构和能力已通过检查。
 
-公开演示推荐使用专门测试账号、明确授权的测试联系人和没有个人内容的示范消息：
+调用超时不代表底层任务已取消，尤其不能把读取脚本的重试思路套到发送上。需要发送集成时，先在私有状态文件持久保存 request ID，失败后用原 ID 查 `send-status`，不自动重发。
 
-```powershell
-.\wxcc.cmd help history
-.\wxcc.cmd help db decrypt
-.\wxcc.cmd start --json
-.\wxcc.cmd account --json
-.\wxcc.cmd ids --keyword "测试联系人" --json
-.\wxcc.cmd history --to u_0123456789abcdef --limit 3 --json
+<a id="other-terminals"></a>
+## 其他终端、失败恢复与分享
+
+### cmd 和交互模式
+
+cmd 也能运行 WXcc；下面的 `D:\Tools\WXcc` 是示意路径，先改成自己的程序目录。`set /p` 会等待输入刚才结果中的真实编号：
+
+```bat
+chcp 65001
+cd /d "D:\Tools\WXcc"
+wxcc.cmd ids --keyword "自己的联系人关键词" --json
+set /p wxccTargetAlias=输入明确选择的完整u_编号：
+wxcc.cmd history --to %wxccTargetAlias% --limit 10 --json
 ```
 
-默认脱敏保持开启。完整名称仍显示，正文仍可能敏感，u_ 编号也会关联同一用户；只有测试素材适合直接录屏。演示数据库时可以展示 help 或合成结果，不打开真实明文库、keyfile 或 Token 描述。
+先按流程 1 安装依赖并启动读取；某条命令报错就先停下。cmd 使用 `%变量名%`，不能原样使用 PowerShell 的 `$targetAlias`。
 
-分发源码与锁文件及文档，排除 `data/`、`artifacts/`、日志、缓存、密钥、数据库、个人配置和手工导出。不要仅凭 `.gitignore` 假设 ZIP 自动排除这些内容。
+在程序目录运行 `.\wxcc.cmd` 会进入交互模式，看到 `wxcc>` 后输入命令，不再加 `wxcc.cmd` 前缀：
 
-接收者在另一台支持的机器执行：
-
-```powershell
-npm.cmd ci
-.\wxcc.cmd start
-.\wxcc.cmd account
-.\wxcc.cmd ids --keyword "自己的测试联系人"
-.\wxcc.cmd db list
+```text
+wxcc> help history
+wxcc> account
+wxcc> ids --keyword "自己的联系人关键词"
+wxcc> exit
 ```
 
-发送按接收者自己的账号和目标重新配置。原有 PID、generation、Token 和授权文件不适合迁移。若二进制不匹配或自动 key 不可用，工具应明确失败并按自己的环境继续适配，不能声称已验证所有机器。
+找到实际编号后，可按帮助输入 `history --to 编号 --limit 10`，把“编号”换成完整 `u_` 值。**交互模式不执行 PowerShell 代码**，不支持 `$targetAlias`、`Read-Host`、管道和本页的变量赋值，不能把前面的 PowerShell 整段粘进去。`exit` / `quit` 只退出客户端，宿主和微信继续运行。发送宿主的 Ctrl+C 会保留宿主，清理方式见 [命令手册](commands.md)。
 
-## 示例十五：本地聊天副本修改与撤销
+### 卡住后从哪里继续
 
-此流程修改 WXcc 私有本地副本，不发送消息。微信本机数据库、服务端和对方聊天均不改变。先打开自己的微信并登录，使用专门测试聊天取得实际编号：
+| 遇到什么 | 下一步 |
+| --- | --- |
+| 命令或参数不清楚 | `.\wxcc.cmd help 命令名`；多级命令如 `help record edit` |
+| `start` 失败 | `doctor --backend reverse-native --json`，核对安装、版本、DLL 指纹和主 PID |
+| 关键词没有结果 | 改关键词重新 `ids`；缓存不是全量好友，不编编号、不直接取同名第一条 |
+| 忘了 `$copyId` | `record list --json`，按账号、聊天和创建时间明确选择，再 `record show` 核对；不用重新导入猜哪份是原副本 |
+| 修改或撤销报版本冲突 | 重新 `record show` / `record changes`，读当前 `revision` 并核对内容后再决定，不去掉版本检查硬重试 |
+| 导出路径被拒绝 | 选程序和微信数据目录之外的新文件，已有导出不能覆盖 |
+| 自动解密找不到密钥 | 使用自己的私有 `--key-file`，或停在数据库发现；自动取钥尚未真机成功 |
+| 发送超时或状态未知 | 保留原请求 ID 查 `send-status` 并核对客户端，不重复提交 |
 
-```powershell
-.\wxcc.cmd start
-.\wxcc.cmd account --json
-.\wxcc.cmd ids --keyword "测试联系人" --json
-.\wxcc.cmd help record
-.\wxcc.cmd record edit --help
-```
+### 哪些内容不能直接分享
 
-下面 `Read-Host` 会等待你输入实际值，避免把演示编号当成真实目标。导入后保存真实 `copyId`，并检查每步退出码：
+默认脱敏只处理身份 ID 和认证秘密，不会把整份聊天变成公开素材。名称、正文、修改前后内容及完整 SQLite 副本仍含隐私；`u_` 编号也能关联同一用户。公开演示优先使用流程 5 的虚构 JSON，真实消息输出先在本机检查。
 
-```powershell
-$targetAlias = Read-Host "输入 ids 返回的实际 u_ 编号"
-$rawCopy = .\wxcc.cmd record import --to $targetAlias --limit 30 --json
-if ($LASTEXITCODE -ne 0) { throw "导入失败，先按错误提示检查账号与目标" }
-$copy = $rawCopy | ConvertFrom-Json
-$copyId = $copy.copyId
-Write-Host "已建立本地副本：$copyId，初始版本：$($copy.revision)"
-.\wxcc.cmd record show --copy $copyId --limit 30 --json
-if ($LASTEXITCODE -ne 0) { throw "查看副本失败" }
-$recordId = Read-Host "输入 show 中要修改记录的实际 m_ recordId"
-```
+分享程序时不要附带 `data/`、`artifacts/`、日志、缓存、密钥、数据库、个人配置和手工导出；压缩包不会因为有 `.gitignore` 就自动排除它们。换电脑后重新安装依赖、识别账号和选择目标，PID、宿主描述、Token 与发送配置不直接迁移。
 
-终端显示名称和正文，选择时留意隐私。每条消息都有独立的 `recordId`，即使来源消息 `id` 都是 `"0"` 也能准确选择。只有当精确来源消息 ID 唯一时才适合 `--message-id`，重复匹配会拒绝。直接导入在服务内部保存原始未脱敏历史，每次导入都建立新副本及新 `recordId`，不会刷新上次修改；`recordId` 仅在同一副本内固定。
+已有 WeFlow 的 HTTP / 本地读取与监听属于进阶用法，见 [命令手册](commands.md)。原生 `watch` 尚未实现，不能把本页的原生历史读取当作实时监听。
 
-修改一条正文，并核对实际返回的 `changeId` 和 `revision`：
-
-```powershell
-$rawEdit = .\wxcc.cmd record edit --copy $copyId --record-id $recordId --text "仅保存在本地副本的虚构修改" --revision $copy.revision --json
-if ($LASTEXITCODE -ne 0) { throw "修改失败；若版本变化，先重新 show" }
-$edit = $rawEdit | ConvertFrom-Json
-Write-Host "修改编号：$($edit.changeId)，当前版本：$($edit.revision)"
-.\wxcc.cmd record changes --copy $copyId --limit 30 --json
-.\wxcc.cmd record show --copy $copyId --limit 30 --json
-```
-
-`changes` 能查看 `before`、`after` 及撤销记录，也包含原始正文。版本冲突时先重新 `show`、确认当前内容，再决定是否用当前版本修改，不能盲目去掉 `--revision` 重试。
-
-正文含换行或引号时，将修改内容放进自己的私有 UTF-8 文件，再使用 `--text-file`。直接正文及文件均最多 1 MiB，空的 UTF-8 文件可把正文清空。只改时间时无需正文参数：
-
-```powershell
-.\wxcc.cmd record edit --copy $copyId --record-id $recordId --text-file "D:\Private\replacement.txt" --json
-.\wxcc.cmd record edit --copy $copyId --record-id $recordId --timestamp 1791321600000 --json
-```
-
-毫秒时间是虚构示例，请按自己的用途填写。`--timestamp` 与 `--revision` 都必须是 0–9007199254740991 的整数。不能修改发言人、本人、聊天身份或来源消息 ID。
-
-默认撤销最近未撤销的一次修改，可以逐步恢复修改前内容：
-
-```powershell
-.\wxcc.cmd record undo --copy $copyId --json
-.\wxcc.cmd record changes --copy $copyId --json
-.\wxcc.cmd record show --copy $copyId --json
-```
-
-也可用 `changes` 返回的实际修改编号定向撤销。如果同一条记录后面还有未撤销修改，先撤销后面的修改，再撤销前面的修改；不能跳过同记录后续修改。下面两个值需从当前实际结果复制：
-
-```powershell
-$changeId = Read-Host "输入 changes 中当前可撤销的实际 e_ changeId"
-$revision = Read-Host "输入 show 返回的当前 revision"
-.\wxcc.cmd record undo --copy $copyId --change-id $changeId --revision $revision --json
-```
-
-`undo` 恢复该次修改前的正文及时间，保留历史并更新版本。继续从后往前撤销，可以回到最初导入内容；已撤销的同一修改不能再次撤销。
-
-导出当前内容时选择尚不存在的私有文件：
-
-```powershell
-.\wxcc.cmd record export --copy $copyId --output "D:\Private\local-chat-copy.json" --json
-```
-
-输出不能覆盖已有文件，不允许写入程序源码或微信实时 `db_storage` 目录。导出默认 ID 脱敏，始终带 `localOnly`、`edited`、`revision` 等标记。姓名和正文不会自动隐藏；查看或分享文件前仍需检查内容。导出另一版本时使用新文件名，恢复副本不会自动改写之前导出的文件。
-
-### 完全离线导入自己的历史 JSON
-
-如果已经在私有目录保存了 `history --no-redact --json` 的原始结果，微信关闭时也能导入及编辑。输入须是有效 UTF-8 JSON 普通文件，最多 64 MiB、10000 条记录，并且只包含一个明确聊天。`--self` 必须是完整精确本人 ID，不是 `u_` 编号或脱敏展示值：
-
-```powershell
-.\wxcc.cmd record import --input "D:\Private\private-history.json" --self wxid_demo_self --to wxid_demo_friend --json
-.\wxcc.cmd record list --json
-```
-
-上述 `wxid_` 值须替换为自己的准确值。文件包含 `self` 时应与命令一致；省略 `--to` 时文件 `chatId` 或所有消息必须能证明唯一聊天。不能混合不同聊天，也不能导入默认脱敏的历史。离线导入可用本机已登记的 `u_` 目标，但不会连接微信重新获取联系人。
-
-离线测试可直接用 [命令手册中的虚构 JSON](commands.md#record-import离线导入已有历史-json)，保留字符串消息 ID。保存后的 `list/show/edit/changes/undo/export` 全部离线，与微信是否运行无关。`data/history-copies/` 保留原文和所有修改历史，不要手改文件绕过验证，也不要将它与导出 JSON 放进源码分发包。
-
-返回 [README](../README.md)。逐参数说明、错误表及支持边界见 [命令手册](commands.md)。
+返回 [README](../README.md)。

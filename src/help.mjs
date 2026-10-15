@@ -1,14 +1,14 @@
 import { WxError } from './errors.mjs';
 
 export const COMMAND_HELP = Object.freeze({
-  start: { summary: '自动发现微信安装和主进程，启动或复用只读原生宿主。', usage: 'start [--pid PID] [--install-path DIR] [--profile FILE] [--timeout 20000]', examples: ['wxcc start', 'wxcc start --install-path "D:\\Apps\\Weixin" --json'], notes: ['先打开微信并登录。只接受已实现且 DLL SHA-256 匹配的 Windows x64 版本。', '当前原生 ABI 支持 4.1.15.13；不匹配、任务阻塞或源码改变时拒绝继续。', '启动不发送消息。常驻宿主保持运行，CLI 退出不会卸载脚本。'], next: ['wxcc account', 'wxcc ids'] },
+  start: { summary: '连接已经登录的微信，准备读取聊天。', usage: 'start [--pid PID] [--install-path DIR] [--profile FILE] [--timeout MS]', examples: ['wxcc start', 'wxcc start --install-path "D:\\Apps\\Weixin" --json'], notes: ['先打开微信并登录。当前支持微信 4.1.15.13 x64，程序会检查安装文件是否匹配。', '默认等待 60 秒；--timeout 使用毫秒，例如 60000。看到 ready:true 后继续查看账号和联系人。', '后台读取程序会继续运行；本次 CLI 命令结束后，读取连接仍然保留。'], next: ['wxcc account', 'wxcc ids --keyword "小明"'] },
   doctor: { summary: '检查安装、版本、进程与选定后端能力。', usage: 'doctor [--backend reverse-native] [--install-path DIR] [--verbose]', examples: ['wxcc doctor --backend reverse-native --json'], notes: ['检查不自动启动微信或发送消息。读取和发送分别报告能力；连接失败会附错误。'], next: ['wxcc start'] },
   status: { summary: 'doctor 的同义命令。', usage: 'status [--backend reverse-native]', examples: ['wxcc status --backend reverse-native'] },
   inspect: { summary: '查看当前原生宿主、代次、读取和发送状态。', usage: 'inspect --backend reverse-native [--token-file FILE]', examples: ['wxcc inspect --backend reverse-native --json'], notes: ['inspect 默认后端仍是 weflow-http，请显式选择 reverse-native。令牌始终隐藏。'] },
-  account: { summary: '读取当前已验证的本人账户并登记稳定编号。', usage: 'account [--json] [--no-redact]', examples: ['wxcc account --json'], notes: ['默认 reverse-native。名称完整显示，真实账号 ID 默认部分隐藏。', '只返回当前登录账户；不枚举其他用户的数据。'], next: ['wxcc ids'] },
+  account: { summary: '查看当前微信登录的是哪个账号。', usage: 'account [--json] [--no-redact]', examples: ['wxcc account --json'], notes: ['看 displayName 核对账号名称；alias 是该账号的用户编号。', '名称完整显示，真实账号 ID 默认部分隐藏。目前只返回当前登录账号。'], next: ['wxcc ids --keyword "小明"'] },
   accounts: { summary: '列出当前运行代次实际验证过的账户。', usage: 'accounts [--json]', examples: ['wxcc accounts --json'], notes: ['目前原生宿主只证明当前账户；complete:false 不是全盘多账号清单。'] },
-  ids: { summary: '读取已加载联系人缓存，登记稳定 SHA-256 用户编号。', usage: 'ids [--keyword NAME] [--json] [--no-redact]', examples: ['wxcc ids --keyword "测试联系人"', 'wxcc ids --json'], notes: ['u_ 加真实 ID 的 SHA-256 前 16 位十六进制；新增用户不会重新编号。', '昵称只用于筛选。history/send 路由使用已登记编号或完整 ID。', 'complete:false 表示客户端已加载缓存，并非全部联系人。获取编号不授权发送。'], next: ['wxcc history --to u_0123456789abcdef --limit 30'] },
-  history: { summary: '通过稳定用户编号读取指定个人会话记录。', usage: 'history --to USER [--limit 30] [--json]', examples: ['wxcc history --to u_0123456789abcdef --limit 30 --json', 'wxcc history u_0123456789abcdef --limit 10'], notes: ['默认 reverse-native；先 start，再 ids 登记目标。不需要手填本人 ID 或数据库密钥。', '目前原生读取限明确的个人会话；群聊不在已验证范围。', '返回正文可能包含隐私，ID 脱敏不会自动清除所有正文信息。'], next: ['wxcc help db'] },
+  ids: { summary: '按备注或昵称找人，取得用于命令的用户编号。', usage: 'ids [--keyword NAME] [--json] [--no-redact]', examples: ['wxcc ids --keyword "小明"', 'wxcc ids --json'], notes: ['在 users 里核对 displayName，复制对应 alias（u_ 开头）；下一步把它填到 history --to 后。', '同名联系人可能有多条，请明确选择；部分隐藏的 chatId 不能用于命令。', 'complete:false 表示当前已加载的联系人，不保证包含全部好友。canSend:false 不影响读取历史。'], next: ['wxcc help history'] },
+  history: { summary: '读取指定好友最近的聊天记录。', usage: 'history --to USER [--limit 30] [--json]', examples: ['wxcc history --to u_0123456789abcdef --limit 10', 'wxcc history --to u_0123456789abcdef --limit 30 --json'], notes: ['--to 填 ids 返回的实际 alias。这里的编号是虚构示例，请替换。', '在 messages 中看 text（正文）、timestamp（时间）和 isSelf（是否自己发的）。', '默认最近 30 条，--limit 为 1 至 200；当前原生读取限个人聊天。', '想修改副本，下一步用 record import；姓名和正文仍会完整显示。'], next: ['wxcc help record import'] },
   record: {
     summary: '将指定聊天记录保存为本地副本，离线修改、撤销并导出。',
     usage: 'record import | list | show | edit | changes | undo | export',
@@ -98,7 +98,27 @@ export function helpData(topic) {
 export function renderHelp(topic) {
   const item = helpData(topic);
   if (topic) return [`wxcc ${topic} — ${item.summary}`, '', `用法：wxcc ${item.usage}`, ...(item.examples?.length ? ['', '示例：', ...item.examples.map(value => `  ${value}`)] : []), ...(item.notes?.length ? ['', ...item.notes] : []), ...(item.next?.length ? ['', '下一步：', ...item.next.map(value => `  ${value}`)] : []), '', '详细文档：docs/commands.md；演示：docs/examples.md', '默认 --redact true；--no-redact 仅主动关闭 ID 脱敏，认证密钥始终隐藏。', ''].join('\n');
-  return ['wxcc — 微信本地命令 CLI', '', '快速开始：', '  wxcc start', '  wxcc account', '  wxcc ids --keyword "测试联系人"', '  wxcc history --to <u_16位十六进制编号> --limit 30', '  wxcc db list', '', '命令：', ...Object.entries(COMMAND_HELP).filter(([name]) => !name.includes(' ')).map(([name, value]) => `  ${name.padEnd(18)} ${value.summary}`), '', '帮助：wxcc help history；wxcc help db decrypt；wxcc <命令> --help；wxcc help --json', '选项可放在命令前后。--backend 选择后端；--json 输出 JSON；--redact true|false 默认 true。', '原生命令 start/account/accounts/ids/history/send/send-status/configure-target/db 默认 reverse-native。', 'doctor/status/inspect/list/contacts/watch 默认 weflow-http；原生检查加 --backend reverse-native。', '名称完整显示，ID 部分隐藏；--no-redact 主动关闭 ID 脱敏，认证密钥仍隐藏。', '环境：WXCC_WEIXIN_PATH、WXCC_CONFIG、WXCC_WEFLOW_URL、WXCC_WEFLOW_TOKEN、WXCC_WECHAT_DB_KEY。', '读取宿主 data/native-read-host.json；发送宿主 data/research-host.json；--token-file 明确指定。', '详细文档：docs/commands.md；演示：docs/examples.md。无参数进入 REPL，exit/quit 退出。', ''].join('\n');
+  return [
+    'wxcc — 用命令读取微信聊天、编辑本地副本', '',
+    '第一次使用：先打开微信并登录，再依次执行。',
+    '  wxcc start                         连接微信',
+    '  wxcc account                       核对当前账号',
+    '  wxcc ids --keyword "小明"           找人，复制返回的 alias',
+    '  wxcc history --to <实际alias> --limit 10',
+    '                                     在 messages[].text 中看正文', '',
+    '在 PowerShell 中，用 .\\wxcc.cmd 代替上面的 wxcc；<实际alias> 要换成查询结果。',
+    '进入 wxcc> 交互模式后，直接输入 start、account 等命令，不加 wxcc 前缀。', '',
+    '命令一览：',
+    ...Object.entries(COMMAND_HELP).filter(([name]) => !name.includes(' ')).map(([name, value]) => `  ${name.padEnd(18)} ${value.summary}`), '',
+    '按任务继续：',
+    '  wxcc help record       保存聊天副本，修改、撤销或导出',
+    '  wxcc help send         给配置好的目标发送文字',
+    '  wxcc help db           查看数据库与解密副本', '',
+    '不知道参数怎么填：wxcc help history；wxcc record edit --help。',
+    '--json 方便程序读取结果；默认隐藏部分真实 ID，名称和正文仍会显示。',
+    '完整命令与参数：docs/commands.md；一步一步跟做：docs/examples.md。',
+    '无参数进入 wxcc>；输入 exit 退出。', '',
+  ].join('\n');
 }
 export function errorHint(code) {
   if (/^E_HISTORY_COPY_/.test(code)) return '运行 wxcc help record；用 record list / show 核对副本、记录编号与当前 revision，离线输入须含精确 ID 和唯一聊天。';
