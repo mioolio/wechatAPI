@@ -41,7 +41,7 @@ export function createDatabaseService(options = {}, dependencies = {}) {
       if (!['status', 'list', 'decrypt'].includes(action)) throw new WxError('E_ARGUMENT', '未知数据库命令。');
       if (args.input) {
         if (action !== 'decrypt' || !options['key-file'] || args.database) throw new WxError('E_ARGUMENT', '离线解密需要 --input、--key-file 和 --output。');
-        const result = await decrypt({ databasePath: args.input, output: args.output, keyFile: options['key-file'], keyMode: args.keyMode ?? 'raw' });
+        const result = await decrypt({ databasePath: args.input, output: args.output, keyFile: options['key-file'], keyMode: args.keyMode ?? 'raw', includeKey: args.showKey === true });
         return { source: 'offline-database-copy', ...result, accountCryptographicBinding: false, automaticMessagesSent: 0 };
       }
       const account = verifiedAccount(await accountProvider());
@@ -62,9 +62,14 @@ export function createDatabaseService(options = {}, dependencies = {}) {
       });
       const common = { source: 'current-account-databases', accountAlias: recipientAlias(account.self), accountDisplayName: account.displayName, ...publicInfo, databases, automaticMessagesSent: 0 };
       if (action !== 'decrypt') return common;
-      if (typeof args.database !== 'string' || !aliases.has(args.database)) throw new WxError('E_DB_UNKNOWN', '数据库编号不在当前账号发现结果中；先运行 wxcc db list。');
-      if (!args.output) throw new WxError('E_ARGUMENT', '解密必须指定新副本 --output。');
-      const selected = aliases.get(args.database);
+      let database = args.database;
+      if (database === undefined && args.autoSelect === true) {
+        const priority = { session: 0, 'message-history': 1, contact: 2 };
+        database = databases.filter(row => priority[row.role] !== undefined).sort((a, b) => priority[a.role] - priority[b.role] || a.alias.localeCompare(b.alias))[0]?.alias;
+      }
+      if (typeof database !== 'string' || !aliases.has(database)) throw new WxError('E_DB_UNKNOWN', '数据库编号不在当前账号发现结果中；先运行 wxcc db list。');
+      if (!args.output && args.keyOnly !== true) throw new WxError('E_ARGUMENT', '解密副本需要 --output；直接获取 key 可运行 wxcc decrypt。');
+      const selected = aliases.get(database);
       let acquired;
       let memoryAuthenticated = false;
       try {
@@ -79,8 +84,8 @@ export function createDatabaseService(options = {}, dependencies = {}) {
           memoryAuthenticated = true;
           return acquired;
         };
-        const result = await decrypt({ databasePath: selected.path, output: args.output, keyFile: options['key-file'], keyMode: args.keyMode ?? 'raw', keyProvider, beforePublish: guard });
-        return { source: 'current-account-database-copy', databaseAlias: args.database, accountAlias: common.accountAlias, ...result, accountCryptographicBinding: memoryAuthenticated, binding: memoryAuthenticated ? 'current-process-page-auth' : 'directory-match-key-file-auth', automaticMessagesSent: 0 };
+        const result = await decrypt({ databasePath: selected.path, output: args.output, keyFile: options['key-file'], keyMode: args.keyMode ?? 'raw', keyProvider, beforePublish: guard, keyOnly: args.keyOnly === true, includeKey: args.showKey === true });
+        return { source: args.keyOnly === true ? 'current-account-database-key' : 'current-account-database-copy', databaseAlias: database, accountAlias: common.accountAlias, ...result, accountCryptographicBinding: memoryAuthenticated, binding: memoryAuthenticated ? 'current-process-page-auth' : 'directory-match-key-file-auth', automaticMessagesSent: 0 };
       } finally { acquired?.key?.fill(0); acquired?.salt?.fill(0); }
     },
     async close() { await native.close?.(); }

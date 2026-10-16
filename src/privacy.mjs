@@ -25,9 +25,10 @@ function idAlias(id) {
 }
 /**
  * Sanitizes display data only; it never changes the actual RPC input or grants send permission.
- * enabled:false exposes IDs intentionally. Credentials remain hidden in either mode.
+ * enabled:false exposes IDs intentionally. Explicit database-key output only
+ * permits the root 64-hex key; unrelated credentials remain hidden in either mode.
  */
-export function createPrivacyFormatter({ enabled = true, registry, secrets = [], identifiers = [], knownIdentifiers = [] } = {}) {
+export function createPrivacyFormatter({ enabled = true, registry, secrets = [], identifiers = [], knownIdentifiers = [], revealDatabaseKey = false } = {}) {
   const secretValues = configuredStrings(secrets);
   function identityValues() {
     const registered = typeof registry?.list === 'function' ? registry.list({ includeIds: true }).map(record => record.id) : [];
@@ -38,7 +39,7 @@ export function createPrivacyFormatter({ enabled = true, registry, secrets = [],
     let output = value;
     for (const secret of secretValues) output = output.replaceAll(secret, REDACTED);
     output = output.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/gi, (_match, scheme) => `${scheme} ${REDACTED}`);
-    output = output.replace(/((?<![\w-])["']?(?:authorization|proxy-authorization|x-wxcc-token|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|cookie|set-cookie)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, (_match, prefix) => `${prefix}${REDACTED}`);
+    output = output.replace(/((?<![\w-])["']?(?:authorization|proxy-authorization|x-wxcc-token|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|cookie|set-cookie|dbkey|key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, (_match, prefix) => `${prefix}${REDACTED}`);
     return output;
   }
   function textWithIds(value, ids) {
@@ -56,7 +57,8 @@ export function createPrivacyFormatter({ enabled = true, registry, secrets = [],
   function redactText(value) { return textWithIds(String(value), identityValues()); }
   function redact(value) {
     const ids = identityValues(), active = new WeakSet();
-    function visit(item, field = '') {
+    function visit(item, field = '', rootChild = false) {
+      if (revealDatabaseKey === true && rootChild && field === 'key' && typeof item === 'string' && /^[a-f0-9]{64}$/i.test(item)) return item;
       if (secretField(field)) return item === undefined ? undefined : REDACTED;
       const normalized = keyName(field);
       if (typeof item === 'string') {
@@ -89,7 +91,7 @@ export function createPrivacyFormatter({ enabled = true, registry, secrets = [],
           if (!descriptor.enumerable && !(item instanceof Error && ['message', 'stack', 'cause'].includes(key))) continue;
           const safeKey = ids.includes(key) || key.includes('wxid_') ? textWithIds(key, ids) : hideSecrets(key);
           // Defining the property directly prevents untrusted __proto__ keys from changing the output prototype.
-          Object.defineProperty(result, safeKey, { value: 'value' in descriptor ? visit(descriptor.value, key) : '[Unavailable]', enumerable: true, configurable: true, writable: true });
+          Object.defineProperty(result, safeKey, { value: 'value' in descriptor ? visit(descriptor.value, key, item === value) : '[Unavailable]', enumerable: true, configurable: true, writable: true });
         }
         return result;
       } finally { active.delete(item); }

@@ -133,6 +133,14 @@ export async function createService(options = {}, dependencies = {}) {
       if (!databaseService) { const create = dependencies.createDatabaseService ?? (await import('./database-service.mjs')).createDatabaseService; databaseService = create(options); }
       return databaseService.execute(args);
     },
+    async decrypt(args = {}) {
+      if (backend !== 'reverse-native') throw new WxError('E_BACKEND', 'decrypt 使用本机微信，请使用默认 reverse-native 后端。');
+      const start = dependencies.startNativeRead ?? (await import('./native-start.mjs')).startNativeRead;
+      const { timeout: _keyTimeout, ...startupOptions } = options;
+      await start(startupOptions);
+      if (!databaseService) { const create = dependencies.createDatabaseService ?? (await import('./database-service.mjs')).createDatabaseService; databaseService = create(options); }
+      return databaseService.execute({ ...args, action: 'decrypt', autoSelect: true, keyOnly: args.output === undefined, showKey: true });
+    },
     async record(args = {}) {
       if (!historyCopyService) {
         const create = dependencies.createHistoryCopyService ?? (await import('./history-copy-service.mjs')).createHistoryCopyService;

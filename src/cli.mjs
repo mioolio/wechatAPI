@@ -11,7 +11,7 @@ export class CliError extends Error {
   }
 }
 
-const commands = new Set(['start', 'configure-target', 'db', 'record', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
+const commands = new Set(['start', 'decrypt', 'configure-target', 'db', 'record', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
 const globalFlags = new Set(['json', 'verbose']);
 const globalValues = new Set(['pid', 'profile', 'self', 'backend', 'url', 'token-file', 'root', 'account-dir', 'key-file', 'interval', 'redact', 'install-path', 'data-root', 'timeout']);
 const localValues = new Set(['to', 'session', 'request-id', 'text', 'limit', 'seconds', 'keyword', 'database', 'input', 'output', 'key-mode', 'copy', 'record-id', 'message-id', 'text-file', 'timestamp', 'revision', 'change-id']);
@@ -58,6 +58,12 @@ export function parseArgs(argv) {
     if (!token.startsWith('--')) throw new CliError(`未知选项：${token}`);
     const equal = token.indexOf('=');
     const key = token.slice(2, equal === -1 ? undefined : equal);
+    if (key === 'show-key') {
+      if (equal !== -1) throw new CliError('--show-key 不接受值。');
+      if (Object.hasOwn(values, key)) throw new CliError('--show-key 重复指定。');
+      values[key] = true;
+      continue;
+    }
     if (key === 'no-redact' || key === 'pick') {
       if (equal !== -1) throw new CliError(`--${key} 不接受值。`);
       const target = key === 'pick' ? values : options;
@@ -72,7 +78,7 @@ export function parseArgs(argv) {
       continue;
     }
     if (!globalValues.has(key) && !localValues.has(key)) {
-      const suggestion = suggestName(key, [...globalValues, ...localValues, ...globalFlags, 'no-redact', 'pick', 'help']);
+      const suggestion = suggestName(key, [...globalValues, ...localValues, ...globalFlags, 'no-redact', 'pick', 'show-key', 'help']);
       throw new CliError(`未知选项：--${key}${suggestion ? `；可能是 --${suggestion}。` : '。运行 wxcc help 查看选项。'}`);
     }
     let value;
@@ -105,7 +111,7 @@ export function parseArgs(argv) {
     if (Object.keys(values).length) throw new CliError('请先指定命令。');
     return { command, options, args: {} };
   }
-  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : command === 'history' ? ['to', 'limit'] : command === 'watch' ? ['to'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'db' ? ['database', 'input', 'output', 'key-mode'] : command === 'record' ? ['to', 'limit', 'input', 'output', 'copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision', 'change-id'] : [];
+  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : command === 'history' ? ['to', 'limit'] : command === 'watch' ? ['to'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'decrypt' ? ['database', 'output', 'key-mode', 'show-key'] : command === 'db' ? ['database', 'input', 'output', 'key-mode', 'show-key'] : command === 'record' ? ['to', 'limit', 'input', 'output', 'copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision', 'change-id'] : [];
   for (const key of Object.keys(values)) {
     if (!allowed.includes(key)) throw new CliError(`${command} 不支持 --${key}。`);
   }
@@ -166,7 +172,17 @@ export function parseArgs(argv) {
       if (!options['key-file'] && options.timeout !== undefined && (options.timeout < 100 || options.timeout > 30000)) throw new CliError('自动数据库密钥扫描 --timeout 范围为 100–30000 毫秒。');
       if (args.database && !/^d_[a-f0-9]{16}$/.test(args.database)) throw new CliError('--database 必须是 db list 返回的 d_ 编号。');
       if (args['key-mode']) { args.keyMode = args['key-mode']; delete args['key-mode']; }
+      if (args['show-key']) { args.showKey = true; delete args['show-key']; }
     } else if (Object.keys(values).length) throw new CliError(`db ${args.action} 不接受解密参数。`);
+  }
+  if (command === 'decrypt') {
+    if (args.database && !/^d_[a-f0-9]{16}$/.test(args.database)) throw new CliError('--database 必须是 db list 返回的 d_ 编号。');
+    if (args['key-mode'] && (!options['key-file'] || !['raw', 'passphrase', 'auto'].includes(args['key-mode']))) throw new CliError('--key-mode 需要 --key-file，值为 raw、passphrase 或 auto。');
+    if (!options['key-file'] && options.timeout !== undefined && (options.timeout < 100 || options.timeout > 30000)) throw new CliError('自动数据库密钥扫描 --timeout 范围为 100–30000 毫秒。');
+    if (args['key-mode']) { args.keyMode = args['key-mode']; delete args['key-mode']; }
+    delete args['show-key'];
+    args.showKey = true;
+    args.keyOnly = args.output === undefined;
   }
   if (command === 'configure-target') {
     if (args.to === undefined && positionals.length) args.to = nonempty(positionals.shift(), '用户编号');
@@ -235,7 +251,7 @@ const stringify = (value, pretty = false) => JSON.stringify(value, (_key, item) 
 function reportError(error, stream, json, privacy = createPrivacyFormatter()) {
   const code = typeof error?.code === 'string' ? error.code : 'ERROR';
   const message = error instanceof Error ? error.message : String(error);
-  const hint = errorHint(code);
+  const hint = typeof error?.hint === 'string' ? error.hint : errorHint(code);
   stream.write(json ? `${privacy.format({ error: { code, message, ...(hint ? { hint } : {}) } })}\n` : `错误 [${code}]：${privacy.redactText(message)}\n${hint ? `建议：${hint}\n` : ''}`);
 }
 
@@ -301,7 +317,7 @@ export async function runCli(argv = [], dependencies = {}) {
 
   async function execute(parsed) {
     const options = { ...baseOptions, ...parsed.options };
-    if (['start', 'configure-target', 'db', 'record', 'account', 'accounts', 'history', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
+    if (['start', 'decrypt', 'configure-target', 'db', 'record', 'account', 'accounts', 'history', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
     if (parsed.command === 'help') {
       output.write(options.json ? `${stringify(helpData(parsed.args.topic), true)}\n` : renderHelp(parsed.args.topic));
       return;
@@ -321,6 +337,14 @@ export async function runCli(argv = [], dependencies = {}) {
     let result;
     switch (parsed.command) {
       case 'start': result = await client.start(parsed.args); break;
+      case 'decrypt':
+        try { result = await client.decrypt(parsed.args); }
+        catch (error) {
+          const failure = new CliError(error instanceof Error ? error.message : String(error), error?.code ?? 'E_DB_DECRYPT');
+          failure.hint = [errorHint(failure.code), '简单命令未完成，可尝试高级命令：.\\wxcc.cmd db list --json；参数见 .\\wxcc.cmd help db decrypt。'].filter(Boolean).join(' ');
+          throw failure;
+        }
+        break;
       case 'configure-target': result = await client.configureTarget(parsed.args); break;
       case 'db': result = await client.db(parsed.args); break;
       case 'record': result = await client.record(parsed.args); break;
@@ -387,7 +411,7 @@ export async function runCli(argv = [], dependencies = {}) {
       default: throw new CliError(`未知命令：${parsed.command}`);
     }
     await registry.read();
-    currentPrivacy = createPrivacyFormatter({ enabled: options.redact !== false, registry, identifiers: [options.self, parsed.args.to, parsed.args.session].filter(Boolean) });
+    currentPrivacy = createPrivacyFormatter({ enabled: options.redact !== false, registry, identifiers: [options.self, parsed.args.to, parsed.args.session].filter(Boolean), revealDatabaseKey: result?.ok === true && parsed.args.showKey === true && (parsed.command === 'decrypt' || (parsed.command === 'db' && parsed.args.action === 'decrypt')) });
     if (result !== undefined) output.write(`${typeof result === 'string' && !options.json ? currentPrivacy.redactText(result) : currentPrivacy.format(result, { pretty: !options.json })}\n`);
   }
 

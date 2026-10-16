@@ -95,9 +95,10 @@ function validHeader(page, profile) {
 export function verifyDatabaseKey({ firstPage, key, keyMode = 'raw', mode, salt, ...options } = {}) {
   if (!(firstPage instanceof Uint8Array) || firstPage.length < 1024) fail('E_DB_HEADER', '数据库首页面不完整。');
   const page = Buffer.from(firstPage);
-  if (page.subarray(0, 16).equals(SQLITE_HEADER)) return { valid: false, reason: 'already-plaintext' };
-  const material = keyMaterial(key, salt);
+  let material;
   try {
+    if (page.subarray(0, 16).equals(SQLITE_HEADER)) return { valid: false, reason: 'already-plaintext' };
+    material = keyMaterial(key, salt);
     const databaseSalt = page.subarray(0, 16);
     if (material.salt && !equal(databaseSalt, material.salt)) return { valid: false, reason: 'salt-mismatch' };
     let authenticatedHeaderFailed = false;
@@ -116,7 +117,7 @@ export function verifyDatabaseKey({ firstPage, key, keyMode = 'raw', mode, salt,
       } finally { erase(context); }
     }
     return { valid: false, reason: authenticatedHeaderFailed ? 'sqlite-header-invalid' : 'authentication-failed' };
-  } finally { material.key.fill(0); material.salt?.fill(0); }
+  } finally { material?.key.fill(0); material?.salt?.fill(0); page.fill(0); }
 }
 
 function checksum(bytes, state, bigEndian) {
@@ -199,6 +200,37 @@ async function snapshot(databasePath, { maximumBytes, snapshotAttempts }) {
     finally { if (!retained) { database?.fill(0); wal?.fill(0); } }
   }
   fail('E_DB_SNAPSHOT_BUSY', '数据库正在变化，无法取得稳定快照；稍后重试。');
+}
+
+/** Read only the codec header twice; no database/WAL copy or output is created. */
+async function stableFirstPage(databasePath, { snapshotAttempts }) {
+  for (let attempt = 0; attempt < snapshotAttempts; attempt++) {
+    let handle, first, second;
+    try {
+      handle = await fs.open(databasePath, 'r');
+      const before = await handle.stat({ bigint: true });
+      if (!before.isFile() || before.size < 1024n) fail('E_DB_HEADER', '数据库首页面不完整。');
+      const length = Number(before.size < 4096n ? before.size : 4096n);
+      first = Buffer.alloc(length); second = Buffer.alloc(length);
+      const firstRead = await handle.read(first, 0, length, 0);
+      const middle = await handle.stat({ bigint: true });
+      const secondRead = await handle.read(second, 0, length, 0);
+      const after = await handle.stat({ bigint: true });
+      const stamp = stat => `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+      if (firstRead.bytesRead === length && secondRead.bytesRead === length
+        && stamp(before) === stamp(middle) && stamp(middle) === stamp(after) && equal(first, second)) {
+        const page = first; first = null;
+        return { database: page, wal: Buffer.alloc(0) };
+      }
+    } catch (error) {
+      if (error instanceof WxError) throw error;
+      if (!['ENOENT', 'EBUSY', 'EAGAIN'].includes(error.code)) fail('E_DB_PATH', '数据库首页面无法读取。');
+    } finally {
+      first?.fill(0); second?.fill(0);
+      await handle?.close().catch(() => {});
+    }
+  }
+  fail('E_DB_SNAPSHOT_BUSY', '数据库首页面正在变化，无法确认密钥；稍后重试。');
 }
 
 async function protectedDirectory(parent) {
@@ -307,10 +339,16 @@ async function writeAll(file, bytes, position) {
     offset += bytesWritten;
   }
 }
+async function publishGuard(options) {
+  if (!options.beforePublish) return;
+  try { if (await options.beforePublish() === false) fail('E_DB_PUBLISH_GUARD', '发布前账号验证未通过。'); }
+  catch (error) { if (error instanceof WxError) throw error; fail('E_DB_PUBLISH_GUARD', '发布前账号验证失败。'); }
+}
 
 /**
- * Copy-only offline export. No live DB is opened with SQLite or written.
- * The returned outputPath is private/non-enumerable. JSON summaries contain no key/path.
+ * Authenticate a key, or export a copy. No live DB is opened with SQLite or written.
+ * The returned outputPath is private/non-enumerable. Keys are returned only for
+ * explicit keyOnly/includeKey requests, always as the derived raw AES key.
  * Buffers owned by the caller/provider are copied; only module-owned key copies are wiped.
  */
 export async function decryptDatabase(options = {}) {
@@ -322,9 +360,9 @@ export async function decryptDatabase(options = {}) {
   let keyCandidates = [], selected, temporaryFolder, file, providerContext;
   try {
     try { source = await fs.realpath(databasePath); } catch { fail('E_DB_PATH', '数据库文件无法读取。'); }
-    const destination = await outputTarget(source, options.output);
+    const destination = options.keyOnly === true ? undefined : await outputTarget(source, options.output);
     const profiles = profilesFor(options);
-    captured = await snapshot(source, { maximumBytes, snapshotAttempts });
+    captured = options.keyOnly === true ? await stableFirstPage(source, { snapshotAttempts }) : await snapshot(source, { maximumBytes, snapshotAttempts });
     if (captured.database.length < 1024 || captured.database.subarray(0, 16).equals(SQLITE_HEADER)) fail('E_DB_HEADER', '此文件不是受支持的加密数据库。');
     const salt = Buffer.from(captured.database.subarray(0, 16));
     providerContext = { databasePath: source, salt, firstPage: Buffer.from(captured.database.subarray(0, 4096)), profiles };
@@ -339,6 +377,10 @@ export async function decryptDatabase(options = {}) {
     salt.fill(0);
     if (!selected) fail('E_DB_KEY_INVALID', '候选密钥未通过数据库首页面认证。');
     const { profile } = selected;
+    if (options.keyOnly === true) {
+      await publishGuard(options);
+      return { ok: true, scope: 'database-key', keyAuthenticated: true, profile: profile.id, keyMode: selected.keyMode, keyEncoding: 'hex', key: selected.aes.toString('hex') };
+    }
     if (captured.database.length % profile.pageSize !== 0) fail('E_DB_SIZE', '数据库长度不是完整页的倍数。');
     const maximumPages = Math.floor(maximumBytes / profile.pageSize);
     const wal = parseDatabaseWal(captured.wal, { pageSize: profile.pageSize, maximumPages });
@@ -377,15 +419,13 @@ export async function decryptDatabase(options = {}) {
     await writeAll(file, header, 0); header.fill(0);
     await file.sync(); await file.close(); file = null;
     const integrity = await quickCheck(temporaryFile);
-    if (options.beforePublish) {
-      try { if (await options.beforePublish() === false) fail('E_DB_PUBLISH_GUARD', '发布前账号验证未通过。'); }
-      catch (error) { if (error instanceof WxError) throw error; fail('E_DB_PUBLISH_GUARD', '发布前账号验证失败。'); }
-    }
+    await publishGuard(options);
     // A new hard link publishes atomically without overwriting any existing destination,
     // while keeping the protected temporary file's ACL (also on NTFS).
     try { await fs.link(temporaryFile, destination); }
     catch (error) { fail(error.code === 'EEXIST' ? 'E_DB_OUTPUT_EXISTS' : 'E_DB_OUTPUT', '无法安全发布解密副本。'); }
     const result = { ok: true, profile: profile.id, keyMode: selected.keyMode, pages: finalPages, bytes: finalPages * profile.pageSize, authenticatedPages: databasePages + wal.committedFrames, wal: { present: captured.wal.length > 0, committedFrames: wal.committedFrames, uncommittedFrames: wal.uncommittedFrames, staleBytes: wal.staleBytes }, ...integrity };
+    if (options.includeKey === true) { result.keyEncoding = 'hex'; result.key = selected.aes.toString('hex'); }
     Object.defineProperty(result, 'outputPath', { value: destination, enumerable: false });
     return result;
   } catch (error) { if (error instanceof WxError) throw error; fail('E_DB_DECRYPT', '离线数据库解密失败。'); }

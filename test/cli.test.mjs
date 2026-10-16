@@ -18,6 +18,71 @@ test('portable startup, local target and database routes select native without s
   }
 });
 
+test('db decrypt accepts an explicit show-key flag without weakening other argument checks', () => {
+  const database = 'd_0123456789abcdef';
+  assert.deepEqual(parseArgs(['db', 'decrypt', '--database', database, '--output', 'copy.sqlite', '--show-key']), {
+    command: 'db', options: {}, args: { action: 'decrypt', database, output: 'copy.sqlite', showKey: true },
+  });
+  for (const argv of [
+    ['db', 'decrypt', '--database', database, '--output', 'copy.sqlite', '--show-key=true'],
+    ['db', 'decrypt', '--database', database, '--output', 'copy.sqlite', '--show-key', '--show-key'],
+    ['db', 'list', '--show-key'], ['db', 'status', '--show-key'],
+    ['account', '--show-key'], ['ids', '--show-key'], ['history', '--to', 'test', '--show-key'],
+  ]) assert.throws(() => parseArgs(argv), { code: 'INVALID_ARGUMENT' });
+});
+
+test('db decrypt exposes only the requested successful root key and keeps identities masked', async () => {
+  const key = '0123456789abcdef'.repeat(4);
+  const database = 'd_0123456789abcdef';
+  const self = 'wxid_key_test_self123';
+  const h = harness({ db: async args => {
+    h.calls.push(['db', args]);
+    return { ok: true, key, self, displayName: '完整姓名', dbKey: key, token: 'private-token', headers: { authorization: key }, child: { key } };
+  } });
+  assert.equal(await runCli(['db', 'decrypt', '--database', database, '--output', 'copy.sqlite', '--show-key', '--json'], h.dependencies), 0);
+  assert.deepEqual(h.calls[1], ['db', { database, output: 'copy.sqlite', action: 'decrypt', showKey: true }]);
+  const result = JSON.parse(h.stdout.text());
+  assert.equal(result.key, key);
+  assert.equal(result.self === self, false);
+  assert.equal(result.displayName, '完整姓名');
+  assert.equal(result.dbKey, '[REDACTED]');
+  assert.equal(result.token, '[REDACTED]');
+  assert.equal(result.headers, '[REDACTED]');
+  assert.equal(result.child.key, '[REDACTED]');
+  assert.equal(h.stderr.text(), '');
+  assert.equal(h.calls.some(call => call[0] === 'send'), false);
+});
+
+test('no-redact and unrelated commands cannot disclose a database key', async () => {
+  const key = 'abcdef0123456789'.repeat(4);
+  const decryptArgs = ['db', 'decrypt', '--database', 'd_0123456789abcdef', '--output', 'copy.sqlite'];
+  for (const flags of [[], ['--no-redact'], ['--redact=false']]) {
+    const h = harness({ db: async () => ({ ok: true, key }) });
+    assert.equal(await runCli([...decryptArgs, '--json', ...flags], h.dependencies), 0);
+    assert.equal(JSON.parse(h.stdout.text()).key, '[REDACTED]');
+    assert.equal(h.stdout.text().includes(key), false);
+  }
+  const other = harness({ account: async () => ({ ok: true, key }) });
+  assert.equal(await runCli(['account', '--json', '--no-redact'], other.dependencies), 0);
+  assert.equal(JSON.parse(other.stdout.text()).key, '[REDACTED]');
+});
+
+test('show-key cannot disclose a key from unsuccessful results or service errors', async () => {
+  const key = 'a1b2c3d4e5f60718'.repeat(4);
+  const argv = ['db', 'decrypt', '--database', 'd_0123456789abcdef', '--output', 'copy.sqlite', '--show-key', '--json'];
+  for (const ok of [false, undefined, 'true']) {
+    const h = harness({ db: async () => ({ ...(ok === undefined ? {} : { ok }), key }) });
+    assert.equal(await runCli(argv, h.dependencies), 0);
+    assert.equal(JSON.parse(h.stdout.text()).key, '[REDACTED]');
+    assert.equal(h.stdout.text().includes(key), false);
+  }
+  const failed = harness({ db: async () => { throw Object.assign(new Error(`decrypt failed key=${key}`), { code: 'E_DB_KEY_NOT_FOUND' }); } });
+  assert.equal(await runCli(argv, failed.dependencies), 1);
+  assert.equal(failed.stdout.text(), '');
+  assert.equal(failed.stderr.text().includes(key), false);
+  assert.equal(JSON.parse(failed.stderr.text()).error.code, 'E_DB_KEY_NOT_FOUND');
+});
+
 function capture() {
   let text = '';
   const stream = new Writable({ write(chunk, _encoding, callback) { text += chunk; callback(); } });

@@ -7,7 +7,7 @@
 | 读取某位好友的历史 | [1. 第一次读取聊天](#read-first-chat) | 当前账号、目标编号和最近消息 |
 | 修改一份聊天副本，再恢复 | [2. 本地修改与撤销](#edit-local-copy) | 可追溯的本地副本和导出 JSON |
 | 准备发送一条测试消息 | [3. 准备发送](#prepare-send) | 明确目标、就绪检查和单次发送回执 |
-| 找到并解密自己的数据库 | [4. 数据库副本](#database-copy) | 单个数据库的独立明文副本 |
+| 获取数据库 key 或导出明文副本 | [4. 一键解密](#database-copy) | 对应库的已认证 key；可选明文副本 |
 | 不连接微信，练习编辑 | [5. 完全离线演示](#offline-demo) | 使用虚构消息完成一次本地编辑 |
 | 从自己的程序调用 WXcc | [6. Node.js 集成](#node-integration) | 参数数组调用和 JSON 结果 |
 
@@ -241,13 +241,37 @@ Write-Host "请保留本次请求 ID：$requestId"
 `accepted` 表示内部提交，不能证明对方收到或已读。超时、`unknown`、`reserved` 或查不到账本时，先核对本机账本、后台发送程序和客户端实际状态，不重新生成 ID 重发，也不把同一个 ID 换目标或正文复用。交互选择 `--pick` 和会话形式 `--session` 的规则见 `.\wxcc.cmd help send`。
 
 <a id="database-copy"></a>
-## 4. 从当前账号找到数据库，导出明文副本
+## 4. 一键获取 key，需要时再导出副本
 
-先完成流程 1 的读取准备。这个流程解密整个数据库副本，不是只导出刚才选中的好友。
-
-### 第一步：列出数据库，选择实际编号
+微信已打开并登录，在 WXcc 目录直接运行：
 
 ```powershell
+.\wxcc.cmd decrypt
+```
+
+不需要先执行 `start` 或查数据库编号。命令会自动准备读取、识别当前账号并选库，验证该库首页后输出 `key`。它是对应数据库的 **64 位十六进制原始 AES key**；此时未导出文件，也未检查整个库。
+
+需要完整明文副本就加一个参数：
+
+```powershell
+.\wxcc.cmd decrypt --output .\data\chat.sqlite
+```
+
+文件必须尚不存在。此时会认证全库和已提交 WAL，再做 `quick_check`，成功后输出副本和 key。命令不修改微信原库。更多参数运行：
+
+```powershell
+.\wxcc.cmd help decrypt
+```
+
+ID 仍默认脱敏，但这两个命令明确输出 key；不要把结果截图中的 key 当作已隐藏。输出的 key 可保存为私有文本文件，再用 `--key-file` 和 `--key-mode raw` 复用。它不一定能解密其他库。
+
+下面的步骤用于**手动指定数据库**。若只想自动取得 key，到这里已经完成；想导出某个主消息库，再按下面操作。整个库包含多位联系人的数据，不限于前面选中的好友。
+
+### 手动指定第一步：列出数据库，选择实际编号
+
+```powershell
+.\wxcc.cmd start
+if ($LASTEXITCODE -ne 0) { throw "读取准备失败" }
 $databaseList = .\wxcc.cmd db list --json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "数据库发现失败" }
 $databaseList.databases | Select-Object alias, role, bytes, walBytes | Format-Table -AutoSize
@@ -261,7 +285,7 @@ if (@($databaseList.databases | Where-Object { $_.alias -eq $databaseAlias }).Co
 
 如果找不到自己的数据，先运行 `.\wxcc.cmd help db list`，按实际位置加 `--data-root`；多个同账号目录时加 `--account-dir`。重新执行列表和选择步骤，并在后续 `db decrypt` 使用同样的路径选项，不按“最近修改”猜目录。
 
-### 第二步：自动取密钥并导出
+### 手动指定第二步：自动取密钥并导出
 
 已在 **Windows 微信 4.1.15.13 x64** 真机通过这条路径导出会话库、主消息库和联系人库。不用准备密钥文件，也不用重新登录或重启微信。
 
@@ -269,15 +293,15 @@ if (@($databaseList.databases | Where-Object { $_.alias -eq $databaseAlias }).Co
 $databaseOutput = Read-Host "输入新的私有 SQLite 完整路径（程序和微信数据目录之外）"
 if (-not [IO.Path]::IsPathRooted($databaseOutput)) { throw "请使用完整路径" }
 if (Test-Path -LiteralPath $databaseOutput) { throw "输出已存在，请换新文件名" }
-.\wxcc.cmd db decrypt --database $databaseAlias --output $databaseOutput --json
+.\wxcc.cmd db decrypt --database $databaseAlias --output $databaseOutput --show-key --json
 if ($LASTEXITCODE -ne 0) { throw "自动解密失败，先按错误信息排查" }
 ```
 
-成功看 `ok:true`、`quickCheck:"ok"` 和 `profile`。只有从当前已验证进程取得候选并完成页面认证，才会报告 `accountCryptographicBinding:true`。找不到密钥、数据库尚未加载或参数不支持时会失败，按实际错误处理。
+成功看 `ok:true`、`quickCheck:"ok"`、`profile` 和 `key`。这里的 `--show-key` 要求成功后输出原始 AES key；省略它就只导出，不显示 key。只有从当前已验证进程取得候选并完成页面认证，才会报告 `accountCryptographicBinding:true`。找不到密钥、数据库尚未加载或参数不支持时会失败，按实际错误处理。
 
 部分搜索索引库会提示 `E_DB_SQLITE_TOKENIZER`：页面认证已通过，但当前 SQLite 缺少微信专用分词器 `MMFtsTokenizer`，无法完成该库的验证，因此不会发布副本。这不说明密钥错误或库已损坏。先选择 `message-history` 主消息库导出聊天正文。其他未识别的 SQLite 检查失败仍返回 `E_DB_INTEGRITY`，同样不发布副本。
 
-### 第三步：有自己的密钥文件时手动导出
+### 手动指定第三步：有自己的密钥文件时手动导出
 
 先准备好自己的私有文件，再输入路径，不把密钥正文放到终端命令或聊天里。支持的文件格式见 `.\wxcc.cmd help db decrypt`：32 原始字节、64 位十六进制文本或 SQLCipher `x'64/96hex'`；不是任意长度密码。
 

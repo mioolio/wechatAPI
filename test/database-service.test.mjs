@@ -61,6 +61,29 @@ test('online key-file export rechecks owner before publication', async () => {
   await assert.rejects(() => h.service.execute({ action: 'decrypt', database: databaseAlias(self, 'message/message_0.db'), output: 'copy.sqlite' }), { code: 'E_DB_ACCOUNT_CHANGED' });
 });
 
+test('simple decryption auto-selects a primary database and permits key-only output', async () => {
+  let received;
+  const h = harness({ decrypt: async args => { received = args; await args.beforePublish(); return { ok: true, keyAuthenticated: true, key: 'ab'.repeat(32) }; } }, { 'key-file': 'private-key.txt' });
+  const result = await h.service.execute({ action: 'decrypt', autoSelect: true, keyOnly: true, showKey: true });
+  assert.equal(result.databaseAlias, databaseAlias(self, 'message/message_0.db'));
+  assert.equal(result.source, 'current-account-database-key');
+  assert.equal(result.keyAuthenticated, true);
+  assert.equal(received.output, undefined);
+  assert.equal(received.keyOnly, true);
+  assert.equal(received.includeKey, true);
+});
+
+test('automatic selection prefers the session database and excludes search indexes', async () => {
+  const rows = ['message/message_fts.db', 'message/message_0.db', 'session/session.db'].map(relativePath => ({ relativePath, path: `D:\\synthetic\\${relativePath}` }));
+  const h = harness({
+    discover: async () => ({ databases: rows }),
+    summary: () => ({ databases: rows.map(() => ({ encrypted: true })) }),
+  }, { 'key-file': 'private-key.txt' });
+  const result = await h.service.execute({ action: 'decrypt', autoSelect: true, keyOnly: true, showKey: true });
+  assert.equal(result.databaseAlias, databaseAlias(self, 'session/session.db'));
+  assert.equal(h.calls[0][1], 'D:\\synthetic\\session/session.db');
+});
+
 test('a changed binding revision blocks automatic key scanning even when self and generation match', async () => {
   let scans = 0;
   const h = harness({

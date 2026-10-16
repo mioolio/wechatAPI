@@ -150,6 +150,107 @@ test('copy-only decrypt authenticates and quick_checks before atomic publication
   await assert.rejects(decryptDatabase({ databasePath: f.input, output: f.output, key: testKey }), codeIs('E_DB_OUTPUT_EXISTS'));
 });
 
+test('key-only authenticates a stable first page without output, WAL reads, or a full database copy', async t => {
+  const f = await fixture(t);
+  const ciphertext = encrypted(f.bytes);
+  await writeInput(f, ciphertext, Buffer.from('not a valid WAL'));
+  // The key command is independent of full-copy size, later pages and active journals.
+  const input = await fs.open(f.input, 'r+');
+  try { await input.truncate(8192); }
+  finally { await input.close(); }
+  await fs.writeFile(`${f.input}-journal`, Buffer.from('active rollback journal'));
+  await fs.chmod(f.input, 0o400);
+  t.after(() => fs.chmod(f.input, 0o600).catch(() => {}));
+  const before = await fs.readdir(f.directory, { recursive: true });
+  let guards = 0, providerContext;
+  const result = await decryptDatabase({ databasePath: f.input, keyOnly: true, keyProvider: async context => { providerContext = context; return testKey; }, maximumBytes: 4096, output: f.output, beforePublish: async () => { guards++; return true; } });
+  assert.deepEqual(result, { ok: true, scope: 'database-key', keyAuthenticated: true, profile: profile4.id, keyMode: 'raw', keyEncoding: 'hex', key: testKey.toString('hex') });
+  assert.equal(guards, 1);
+  assert.equal('quickCheck' in result, false); assert.equal('pages' in result, false); assert.equal('outputPath' in result, false);
+  assert.deepEqual(await fs.readdir(f.directory, { recursive: true }), before);
+  assert.deepEqual((await fs.readFile(f.input)).subarray(0, 4096), ciphertext);
+  assert.equal(providerContext.firstPage.every(byte => byte === 0), true);
+  assert.equal(providerContext.salt.every(byte => byte === 0), true);
+});
+
+test('key-only refuses changing first-page reads within its bounded retry budget', async t => {
+  const f = await fixture(t); await writeInput(f, encrypted(f.bytes));
+  const inputPath = await fs.realpath(f.input);
+  const open = fs.open;
+  let reads = 0, providerCalls = 0;
+  fs.open = async (...args) => {
+    const handle = await open(...args);
+    if (args[0] === inputPath) {
+      const read = handle.read.bind(handle);
+      handle.read = async (...readArgs) => {
+        const result = await read(...readArgs);
+        reads++; assert.ok(readArgs[2] <= 4096);
+        if (reads % 2 === 0) readArgs[0][100] ^= 1;
+        return result;
+      };
+    }
+    return handle;
+  };
+  try {
+    await assert.rejects(decryptDatabase({ databasePath: f.input, keyOnly: true, snapshotAttempts: 2, keyProvider: async () => { providerCalls++; return testKey; } }), codeIs('E_DB_SNAPSHOT_BUSY'));
+  } finally { fs.open = open; }
+  assert.equal(reads, 4); assert.equal(providerCalls, 0);
+  assert.deepEqual(await fs.readdir(f.directory), ['encrypted']);
+});
+
+test('key-only returns the derived raw AES key for passphrase input and supports all finite profiles', async t => {
+  for (const profile of SUPPORTED_CIPHER_PROFILES) {
+    const f = await fixture(t, profile);
+    const ciphertext = encrypted(f.bytes, 1, profile, 'passphrase');
+    await writeInput(f, ciphertext);
+    const result = await decryptDatabase({ databasePath: f.input, keyOnly: true, key: testKey, keyMode: 'auto' });
+    const expected = pbkdf2Sync(testKey, testSalt, profile.kdfIterations, 32, profile.kdf);
+    try {
+      assert.equal(result.keyMode, 'passphrase'); assert.equal(result.profile, profile.id);
+      assert.equal(result.key, expected.toString('hex')); assert.notEqual(result.key, testKey.toString('hex'));
+      assert.equal(verifyDatabaseKey({ firstPage: ciphertext, key: result.key, keyMode: 'raw', profile: result.profile }).valid, true);
+    } finally { expected.fill(0); }
+    assert.deepEqual(await fs.readdir(f.directory), ['encrypted']);
+  }
+});
+
+test('key-only rejects invalid keys and account guards without returning key material or creating files', async t => {
+  const f = await fixture(t); await writeInput(f, encrypted(f.bytes));
+  const before = await fs.readdir(f.directory, { recursive: true });
+  let guards = 0;
+  await assert.rejects(decryptDatabase({ databasePath: f.input, keyOnly: true, key: Buffer.alloc(32, 2), beforePublish: async () => { guards++; return true; } }), codeIs('E_DB_KEY_INVALID'));
+  assert.equal(guards, 0);
+  for (const guard of [async () => false, async () => { throw new Error('private synthetic guard'); }, async () => { throw new WxError('E_DB_ACCOUNT_CHANGED', '当前账号已变化。'); }]) {
+    await assert.rejects(decryptDatabase({ databasePath: f.input, keyOnly: true, key: testKey, beforePublish: guard }), error => {
+      assert.ok(['E_DB_PUBLISH_GUARD', 'E_DB_ACCOUNT_CHANGED'].includes(error.code));
+      assert.equal('key' in error, false); assert.equal(JSON.stringify(error).includes(testKey.toString('hex')), false);
+      assert.equal(error.message.includes('private'), false); return true;
+    });
+  }
+  assert.deepEqual(await fs.readdir(f.directory, { recursive: true }), before);
+});
+
+test('full-copy includes raw AES key only when explicitly requested and only after successful publication', async t => {
+  for (const mode of ['raw', 'passphrase']) {
+    const f = await fixture(t); await writeInput(f, encrypted(f.bytes, 1, profile4, mode));
+    let guarded = false;
+    const result = await decryptDatabase({ databasePath: f.input, output: f.output, key: testKey, keyMode: mode, includeKey: true, beforePublish: async () => {
+      guarded = true; await assert.rejects(fs.stat(f.output), error => error.code === 'ENOENT'); return true;
+    } });
+    assert.equal(guarded, true); assert.equal(result.quickCheck, 'ok');
+    assert.equal(result.keyEncoding, 'hex');
+    const expected = mode === 'raw' ? Buffer.from(testKey) : pbkdf2Sync(testKey, testSalt, profile4.kdfIterations, 32, profile4.kdf);
+    try { assert.equal(result.key, expected.toString('hex')); } finally { expected.fill(0); }
+    assert.ok((await fs.stat(f.output)).isFile());
+  }
+  const f = await fixture(t); const corrupt = encrypted(f.bytes); corrupt[100] ^= 1;
+  await writeInput(f, corrupt);
+  await assert.rejects(decryptDatabase({ databasePath: f.input, output: f.output, key: testKey, includeKey: true }), error => {
+    assert.equal(error.code, 'E_DB_KEY_INVALID'); assert.equal('key' in error, false); return true;
+  });
+  await assert.rejects(fs.stat(f.output), error => error.code === 'ENOENT');
+});
+
 test('WAL replay applies the final commit and ignores valid uncommitted frames', async t => {
   const f = await fixture(t);
   f.bytes[18] = 2; f.bytes[19] = 2;

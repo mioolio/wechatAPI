@@ -76,6 +76,47 @@ test('explicit raw IDs preserve identifiers but always hide credentials', () => 
   assert.equal(result.content.includes('secret-value'), false);
   assert.equal(result.content.includes('Bearer hidden'), false);
 });
+
+test('database key disclosure is explicit, root-only and limited to a validated hexadecimal key', () => {
+  const key = '0123456789abcdef'.repeat(4);
+  const source = {
+    ok: true, key, chatId: id, displayName: '完整姓名',
+    dbKey: key, token: 'private-token', headers: { authorization: 'private-header' },
+    nested: { key, dbKey: key }, array: [{ key }],
+  };
+  for (const enabled of [true, false]) {
+    const hidden = createPrivacyFormatter({ enabled }).redact(source);
+    assert.equal(hidden.key, '[REDACTED]');
+    assert.equal(hidden.dbKey, '[REDACTED]');
+  }
+  const result = createPrivacyFormatter({ revealDatabaseKey: true }).redact(source);
+  assert.equal(result.key, key);
+  assert.equal(result.chatId, partial);
+  assert.equal(result.displayName, source.displayName);
+  assert.equal(result.dbKey, '[REDACTED]');
+  assert.equal(result.token, '[REDACTED]');
+  assert.equal(result.headers, '[REDACTED]');
+  assert.equal(result.nested.key, '[REDACTED]');
+  assert.equal(result.nested.dbKey, '[REDACTED]');
+  assert.equal(result.array[0].key, '[REDACTED]');
+  assert.equal(source.nested.key, key);
+  const formatter = createPrivacyFormatter({ revealDatabaseKey: true });
+  for (const invalid of ['0123456789abcdef', 'g'.repeat(64), `${key}\n`, 123, Buffer.alloc(32)]) {
+    assert.equal(formatter.redact({ key: invalid }).key, '[REDACTED]');
+  }
+  assert.equal(formatter.redact([{ key }])[0].key, '[REDACTED]');
+  assert.equal(formatter.redact({ KEY: key }).KEY, '[REDACTED]');
+});
+
+test('database key labels in errors stay hidden even when root key disclosure is enabled', () => {
+  const key = 'abcdef0123456789'.repeat(4);
+  for (const revealDatabaseKey of [false, true]) {
+    const formatter = createPrivacyFormatter({ revealDatabaseKey });
+    const text = formatter.redactText(`failed: key=${key}; dbKey="${key}"; token=private-token`);
+    assert.equal(text.includes(key), false);
+    assert.equal(text.includes('private-token'), false);
+  }
+});
 test('credentials take precedence over partial ID formatting, including unusual identity fields', () => {
   const result = redact({ username: 'credential-abcdefgh', maskedId: 'credential-abcdefgh', displayName: '测试联系人' }, { secrets: ['credential-abcdefgh'] });
   assert.equal(result.username, '[REDACTED]');

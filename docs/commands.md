@@ -10,7 +10,7 @@ WXcc 可以读取当前微信账号、查找联系人和最近聊天记录，也
 - [账号、编号和聊天记录](#账号编号和聊天记录)：`account`、`accounts`、`ids`、`history`
 - [本地聊天副本：修改、撤销与导出](#本地聊天副本修改撤销与导出)：`record import/list/show/edit/changes/undo/export`
 - [目标配置、发送与账本](#目标配置发送与账本)：`configure-target`、发送准备、`send`、`send-status`
-- [数据库命令](#数据库命令)：`db list/status/decrypt`
+- [数据库命令](#数据库命令)：一键 `decrypt`，按库操作 `db list/status/decrypt`
 - [其他读取后端](#其他读取后端)：`list`、`contacts`、`watch`、`probe`
 - [帮助和退出](#帮助和退出)：`help`、`exit` / `quit`
 - [全局选项与命令语法](#全局选项与命令语法)
@@ -647,6 +647,47 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 最近聊天直接用 `history`。`db` 用于发现当前账号数据库，或把一个加密库导出成独立明文 SQLite 副本以便离线分析；不修改实时库，也不自动把副本接入 `history`。
 
+<a id="decrypt"></a>
+### `decrypt` — 一条命令取得当前账号的数据库 key
+
+微信已打开并登录后，直接运行：
+
+```powershell
+.\wxcc.cmd decrypt
+```
+
+命令自动准备读取、识别当前账号、选择数据库，再验证该库首页的 HMAC 和 SQLite 文件头。成功后直接输出 `key`，不需要先查编号或指定路径。默认优先选择会话库，再选择主消息库或联系人库；这是**对应数据库的 key**，不保证其他数据库共用同一把 key。
+
+需要同时导出完整明文副本，只加输出路径：
+
+```powershell
+.\wxcc.cmd decrypt --output .\data\chat.sqlite
+```
+
+输出文件必须尚不存在。加 `--output` 后会认证全部页面、处理已提交 WAL 并运行 SQLite `quick_check`，通过后才发布副本和输出 key。两个命令都不修改微信原库。
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `--output` | 否 | 不创建副本 | 新的明文 SQLite 文件；指定后执行全库导出和检查 |
+| `--database` | 否 | 自动选择 | 使用 `db list` 返回的 `d_` 编号，指定某个库 |
+| `--key-file` | 否 | 自动取得密钥 | 使用自己的私有密钥文件，格式与 `db decrypt` 相同 |
+| `--json` | 否 | 缩进 JSON | 输出紧凑 JSON，便于程序读取 |
+
+| 关键返回字段 | 含义 |
+| --- | --- |
+| `key` | 64 位十六进制原始 AES key，已经过所选库页面认证 |
+| `keyEncoding:"hex"` | key 的编码格式 |
+| `scope:"database-key"`、`keyAuthenticated:true` | 不带 `--output` 时，仅证明 key 与该库首页匹配，未检查整个库 |
+| `quickCheck:"ok"` | 带 `--output` 导出时，完整性检查已通过 |
+
+`decrypt` 本身就是明确请求输出 key。ID 仍按默认规则脱敏，Token 等其他凭据仍隐藏。`--no-redact` 只控制 ID 显示，不是密钥开关。输出的 key 可保存为私有文本文件，用 `--key-file 文件路径 --key-mode raw` 复用；不要把它当作 `passphrase` 再派生。
+
+更多参数和按库操作：
+
+```powershell
+.\wxcc.cmd help decrypt
+```
+
 ### `db list` — 找到当前账号数据库
 
 读取当前本人账号，再列出匹配目录中的数据库编号、类型和大小。
@@ -719,7 +760,7 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 ```text
 .\wxcc.cmd db decrypt (--database DB | --input FILE) --output NEW_FILE
-  [--key-file FILE] [--key-mode raw|passphrase|auto] [--timeout MS] [--json]
+  [--key-file FILE] [--key-mode raw|passphrase|auto] [--timeout MS] [--show-key] [--json]
 ```
 
 | 参数 | 必填 | 默认 | 说明 |
@@ -730,11 +771,12 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 | `--key-file` | 离线必填 | 当前账号模式尝试自动寻找 | 自己已有的私有密钥文件，不把密钥写进命令 |
 | `--key-mode` | 否，仅显式密钥文件可用 | `raw` | `raw` / `passphrase` / `auto`，格式见下面 |
 | `--timeout` | 否，仅自动找密钥时有效 | `15000` | 寻找时限 100–30000 毫秒，不是整个解密操作的超时 |
+| `--show-key` | 否 | 不输出 key | 导出及全部检查成功后，输出该库的 64 位十六进制原始 AES key |
 
 三例分别是自动密钥、自己的密钥文件、离线文件。`d_0123456789abcdef` 换成**当前账号刚刚 `db list.databases[].alias` 返回的编号**，路径换成自己的私有文件：
 
 ```powershell
-.\wxcc.cmd db decrypt --database d_0123456789abcdef --output "D:\Private\database-auto.sqlite" --json
+.\wxcc.cmd db decrypt --database d_0123456789abcdef --output "D:\Private\database-auto.sqlite" --show-key --json
 .\wxcc.cmd db decrypt --database d_0123456789abcdef --key-file "D:\Private\db-key.txt" --output "D:\Private\database-keyfile.sqlite" --json
 .\wxcc.cmd db decrypt --input "D:\Private\Encrypted\session.db" --key-file "D:\Private\db-key.txt" --key-mode raw --output "D:\Private\Offline\session.sqlite" --json
 ```
@@ -747,10 +789,13 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 | `schemaObjects` | 检查到的结构对象数量 |
 | `wal` | 已提交、未提交帧及旧尾部摘要 |
 | `accountCryptographicBinding`、`binding` | 是否证明密钥来自当前验证的微信进程 |
+| `key` | 仅加 `--show-key` 且全部成功后出现；对应所选数据库的原始 AES key |
+
+`db decrypt` 默认隐藏 key；需要它就加 `--show-key`。这不改变 ID 脱敏，也不显示 Token 或其他凭据。`--no-redact` 不会让 key 出现。输出的 key 是 64 位十六进制原始 AES key，保存为自己的私有密钥文件后，使用 `--key-mode raw` 复用。
 
 #### `db decrypt`：当前账号自动密钥
 
-不提供 `--key-file` 时，只读检查当前已验证主进程的有限内存候选，并要求通过数据库页面认证。不打印或保存候选密钥，不要求重新登录或重启微信。
+不提供 `--key-file` 时，只读检查当前已验证主进程的有限内存候选，并要求通过数据库页面认证。扫描中的候选不会打印或保存；只有显式加 `--show-key`，才在导出成功后显示已认证的 key。不要求重新登录或重启微信。
 
 已在 **Windows 微信 4.1.15.13 x64** 通过正式 CLI 自动导出会话库、主消息库和联系人库，全部页面认证与 SQLite `quick_check` 均通过。使用这一流程无需准备固定密钥文件；换账号后重新识别当前账号和数据库。
 
@@ -976,7 +1021,7 @@ quit
 | --- | --- | --- | --- |
 | `--json` | 否 | 关闭 | 成功和错误用 JSON；watch 始终逐行输出 |
 | `--redact true\|false` | 否 | `true` | ID 展示脱敏；名称和正文不会自动隐藏 |
-| `--no-redact` | 否 | 不指定 | 等同主动设置 `--redact false`，凭据仍隐藏 |
+| `--no-redact` | 否 | 不指定 | 等同主动设置 `--redact false`，只控制 ID；不会主动显示密钥 |
 | `--backend NAME` | 否 | 按命令 | 见下一节 |
 | `--verbose` | 否 | 关闭 | doctor / status 详细安装诊断 |
 | `--pid PID` | 否 | 自动发现 | start 和安装诊断，不改变已有后台程序 |
@@ -986,13 +1031,14 @@ quit
 | `--token-file FILE` | 否 | 按后端 | 原生连接描述或 WeFlow Token 文本，不能互换 |
 | `--data-root DIR` | 否 | 自动发现 | db 微信数据根 |
 | `--account-dir DIR` | 否 | db 自动发现；WeFlow native 需明确 | 当前账号目录 |
-| `--key-file FILE` | 按操作 | 无 | db decrypt 或 WeFlow native 私有密钥文件 |
+| `--key-file FILE` | 按操作 | 无 | decrypt、db decrypt 或 WeFlow native 私有密钥文件 |
+| `--show-key` | 否 | 关闭 | db decrypt 成功后输出已认证 key；顶层 decrypt 本来就输出 key |
 | `--root DIR` | 否 | WeFlow 原生资源默认目录 | weflow-native 资源目录，建议显式指定 |
 | `--self SELF` | 按操作 | 原生读取自动取得 | 离线导入、watch、cache 需准确完整本人 ID |
 | `--url URL` | 否 | 环境配置或本机默认 URL | WeFlow HTTP |
 | `--interval MS` | 否 | `1000` | WeFlow watch 轮询间隔，1–2147483647 |
 
-`--json`、`--verbose`、`--pick`、`--no-redact` 是开关，不接值。`--` 后的内容作为位置参数；正文推荐明确用 `--text`，以 `--` 开头的值可用 `--text=--开头的正文`。
+`--json`、`--verbose`、`--pick`、`--no-redact`、`--show-key` 是开关，不接值。`--` 后的内容作为位置参数；正文推荐明确用 `--text`，以 `--` 开头的值可用 `--text=--开头的正文`。
 
 REPL 支持单、双引号，Windows 路径的反斜杠保持原样；双引号内的双引号可用 `\"`。全局选项变化会重建客户端连接，后台程序仍继续运行。
 
@@ -1005,7 +1051,7 @@ REPL 支持单、双引号，Windows 路径的反斜杠保持原样；双引号�
 | `start`、`account`、`accounts`、`ids`、`history` | `reverse-native` | 当前账号、已加载联系人、最近个人会话历史 |
 | `record import --to` | `reverse-native` | 使用对应历史后端读取并保存副本 |
 | `record import --input`、`record list/show/edit/changes/undo/export` | 无需连接后端 | 本地副本操作 |
-| `configure-target`、`send`、`send-status`、`db` | `reverse-native` | 本机单目标文字发送、账本及独立数据库模块 |
+| `configure-target`、`send`、`send-status`、`decrypt`、`db` | `reverse-native` | 本机单目标文字发送、账本及独立数据库模块 |
 | `doctor`、`status`、`inspect` | `weflow-http` | 原生检查加 `--backend reverse-native` |
 | `list`、`contacts`、`watch` | `weflow-http` | 另行配置的读取后端；原生暂不支持 |
 | `help`、`exit`、`quit` | 无需后端 | 帮助或交互控制 |
@@ -1023,7 +1069,7 @@ REPL 支持单、双引号，Windows 路径的反斜杠保持原样；双引号�
 | `c_` + 32 位十六进制 | `record import.copyId` / `record list.copies[].copyId` | 副本查看、编辑等命令的 `--copy` |
 | `m_` + 16 位十六进制 | 该副本 `record show.messages[].recordId` | `record edit --record-id` |
 | `e_` + 32 位十六进制 | 该副本 `record edit.changeId` / `record changes` | `record undo --change-id` |
-| `d_` + 16 位十六进制 | 当前账号 `db list.databases[].alias` | `db decrypt --database` |
+| `d_` + 16 位十六进制 | 当前账号 `db list.databases[].alias` | `decrypt --database` 或 `db decrypt --database` |
 | 完整真实 ID | 对应账号或后端未脱敏结果 | 离线导入本人、非原生后端等明确需要的位置 |
 
 编号不是列表行号。用户编号由真实 ID 的 SHA-256 前 16 位生成，改名或排序不改变；数据库编号由当前本人 ID 和库相对路径生成，路径变化可能改变；记录编号由副本和原始行号生成，同一副本内固定。碰撞时拒绝覆盖。
@@ -1051,7 +1097,7 @@ $result.users | Select-Object alias, displayName, canSend
 {"error":{"code":"INVALID_ARGUMENT","message":"history 需要明确指定 --to <id>。"}}
 ```
 
-`--json` 只改变格式，不改变隐私规则。默认完整显示名称和正文、部分隐藏 ID；即使 `--no-redact`，认证密钥和 Token 仍隐藏。
+`--json` 只改变格式，不改变隐私规则。默认完整显示名称和正文、部分隐藏 ID。顶层 `decrypt` 明确请求输出数据库 key，`db decrypt` 要加 `--show-key` 才输出；`--no-redact` 不控制 key。Token 等其他凭据始终隐藏。
 
 ## 环境变量和配置
 
