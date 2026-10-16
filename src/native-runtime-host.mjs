@@ -11,7 +11,12 @@ import { createPrivacyFormatter } from './privacy.mjs';
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
 const MAX_BODY = 1024 * 1024;
 function failure(code, message) { return Object.assign(new Error(message), { code }); }
-function serializeError(error) { return { code: error?.code ?? 'E_OPERATION', message: error?.message ?? String(error) }; }
+function serializeError(error) {
+  const message = error?.message ?? String(error);
+  // Frida RPC preserves an agent's Error message, but not custom properties.
+  const nativeCode = typeof message === 'string' && /^E_[A-Z][A-Z0-9_]{0,95}$/.test(message) ? message : undefined;
+  return { code: error?.code ?? nativeCode ?? 'E_OPERATION', message };
+}
 function normalizePath(value) { return resolve(value).replaceAll('/', sep).toLowerCase(); }
 function normalizeId(value) {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(value.trim())) throw failure('E_REQUEST_ID', 'requestId must be 1–128 ASCII letters, digits, or ._:-');

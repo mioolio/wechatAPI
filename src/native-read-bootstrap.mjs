@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { callPersistentHost } from './native-runtime-client.mjs';
-import { NATIVE_READ_SCRIPT, requireContactSnapshot } from './native-read-adapter.mjs';
+import { NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS, isNativeAccountChanged, requireContactSnapshot } from './native-read-adapter.mjs';
 import { createPrivacyFormatter } from './privacy.mjs';
 import { WxError } from './errors.mjs';
 
@@ -26,21 +26,21 @@ async function readSource(path) {
 }
 
 function requireIdentity(runtime, host) {
-  if (!runtime || runtime.pid !== host.pid || runtime.version !== host.version || !sameHash(runtime.dllSha256, host.dllSha256) || runtime.automaticMessagesSent !== 0 || (runtime.pendingTasks ?? 0) !== 0 || (runtime.pendingCallbacks ?? 0) !== 0) throw failure('E_NATIVE_READ_SCOPE', '读取 agent 的 PID、版本、DLL 哈希、只读状态或待处理任务未通过验证。');
+  if (!runtime || runtime.pid !== host.pid || runtime.version !== host.version || !sameHash(runtime.dllSha256, host.dllSha256) || runtime.automaticMessagesSent !== 0 || (runtime.pendingTasks ?? 0) !== 0 || (runtime.pendingCallbacks ?? 0) !== 0 || (runtime.activeReads ?? 0) !== 0 || runtime.rebinding === true || runtime.runtimeBlocked === true) throw failure('E_NATIVE_READ_SCOPE', '读取 agent 的 PID、版本、DLL 哈希、只读状态或待处理任务未通过验证。');
 }
 function requirePrepared(runtime, host) {
   requireIdentity(runtime, host);
-  if (runtime.generation !== host.generation || runtime.ready !== true || runtime.accountVerified !== true || runtime.readScopeVerified !== true || !isId(runtime.self) || runtime.self.includes('@chatroom') || runtime.self.toLowerCase().startsWith('gh_')) throw failure('E_NATIVE_READ_SCOPE', '准备后的本人账户或读取范围未通过当前运行代次验证。');
+  if (runtime.generation !== host.generation || runtime.ready !== true || runtime.accountVerified !== true || runtime.readScopeVerified !== true || !Number.isSafeInteger(runtime.bindingRevision) || runtime.bindingRevision < 1 || !isId(runtime.self) || runtime.self.includes('@chatroom') || runtime.self.toLowerCase().startsWith('gh_')) throw failure('E_NATIVE_READ_SCOPE', '准备后的本人账户或读取范围未通过当前运行代次验证。');
 }
-function requireHistory(result, host, self) {
-  if (!result || result.pid !== host.pid || result.generation !== host.generation || result.self !== self || result.chatId !== self || result.source !== 'reverse-native' || result.schemaValidated !== true || result.automaticMessagesSent !== 0 || !Array.isArray(result.messages) || result.messages.length > 1) throw failure('E_NATIVE_HISTORY_SCHEMA', '用于 ABI 验证的本人历史结果身份或结构无效。');
+function requireHistory(result, host, runtime) {
+  if (!result || result.pid !== host.pid || result.generation !== host.generation || result.bindingRevision !== runtime.bindingRevision || result.self !== runtime.self || result.chatId !== runtime.self || result.source !== 'reverse-native' || result.schemaValidated !== true || result.automaticMessagesSent !== 0 || !Array.isArray(result.messages) || result.messages.length > 1) throw failure('E_NATIVE_HISTORY_SCHEMA', '用于 ABI 验证的本人历史结果身份或结构无效。');
   for (const row of result.messages) {
     if (!row || !uint64(row.serverId) || !uint64(row.type) || !uint64(row.createTime) || BigInt(row.createTime) * 1000n > BigInt(Number.MAX_SAFE_INTEGER) || typeof row.content !== 'string' || row.content.length > 1024 * 1024 || !row.content.isWellFormed() || typeof row.senderUsername !== 'string' || (row.senderUsername && !isId(row.senderUsername)) || (row.senderName !== undefined && !isName(row.senderName)) || (row.subType !== undefined && !uint64(row.subType))) throw failure('E_NATIVE_HISTORY_SCHEMA', '用于 ABI 验证的消息字段结构无效。');
   }
 }
 
 /** Prepare only an already verified host. Never attach, replace/unload scripts, or send. */
-export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = resolve(WORKSPACE, 'data/native-read-host.json'), profileFile } = {}, dependencies = {}) {
+export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = resolve(WORKSPACE, 'data/native-read-host.json'), profileFile, rebindAccount = false } = {}, dependencies = {}) {
   const read = dependencies.readJsonImpl ?? readJson;
   const readAgent = dependencies.readSourceImpl ?? readSource;
   const call = dependencies.callImpl ?? callPersistentHost;
@@ -62,6 +62,13 @@ export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = r
   const existing = host.scripts.filter(script => script.name === NATIVE_READ_SCRIPT);
   if (existing.length > 1 || (existing.length === 1 && (existing[0].loaded !== true || existing[0].destroyed !== false))) throw failure('E_NATIVE_READ_SCRIPT_STATE', '同名读取脚本已存在但失效；不会自动卸载或覆盖。');
   if (existing.length && !sameHash(existing[0].sourceSha256, sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '同名已加载脚本与当前 read-native.js 源哈希不一致；不会覆盖或卸载。');
+  for (const script of host.scripts.filter(row => /^readnative_live\d+$/.test(row.name ?? '') && row.name !== NATIVE_READ_SCRIPT)) {
+    const legacy = LEGACY_NATIVE_READ_SCRIPTS.find(row => row.name === script.name);
+    if (!legacy || script.loaded !== true || script.destroyed !== false || !sameHash(script.sourceSha256, legacy.sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '旧版读取脚本的来源或状态无法验证；保留现场，不会卸载或覆盖。');
+    const prior = await invoke('rpc', { name: script.name, method: 'inspect', params: [] });
+    requireIdentity(prior, host);
+    if (prior.generation !== host.generation) throw failure('E_NATIVE_READ_SCOPE', '旧版读取脚本不属于当前宿主代次；不会继续加载。');
+  }
   const agent = existing[0] ?? await invoke('load', { name: NATIVE_READ_SCRIPT, path: 'agents/read-native.js' });
   if (!agent || agent.name !== NATIVE_READ_SCRIPT || agent.loaded !== true || agent.destroyed === true || !sameHash(agent.sourceSha256, sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '实际加载的读取脚本与当前源哈希或名称不匹配。');
   let runtime = await rpc('inspect');
@@ -70,20 +77,28 @@ export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = r
     runtime = await rpc('prepare', [{ pid: host.pid, generation: host.generation, dllSha256: host.dllSha256.toLowerCase() }]);
   }
   requirePrepared(runtime, host);
-  const account = await rpc('account');
-  if (!account || account.pid !== host.pid || account.generation !== host.generation || account.self !== runtime.self || account.scope !== 'current-account' || account.source !== 'reverse-native' || account.accountVerified !== true || account.automaticMessagesSent !== 0 || !isName(account.displayName)) throw failure('E_NATIVE_ACCOUNT_UNVERIFIED', '准备流程的本人账户结果尚未验证。');
+  let account;
+  try { account = await rpc('account'); }
+  catch (error) {
+    if (rebindAccount !== true || !isNativeAccountChanged(error)) throw error;
+    runtime = await rpc('rebind', [{ pid: host.pid, generation: host.generation, dllSha256: host.dllSha256.toLowerCase(), expectedSelf: runtime.self, expectedBindingRevision: runtime.bindingRevision }]);
+    requirePrepared(runtime, host);
+    if (runtime.historyAvailable !== false || runtime.contactSnapshotAvailable !== false) throw failure('E_NATIVE_READ_SCOPE', '账号重新绑定后旧读取范围未清空；不会继续读取。');
+    account = await rpc('account');
+  }
+  if (!account || account.pid !== host.pid || account.generation !== host.generation || account.bindingRevision !== runtime.bindingRevision || account.self !== runtime.self || account.scope !== 'current-account' || account.source !== 'reverse-native' || account.accountVerified !== true || account.automaticMessagesSent !== 0 || !isName(account.displayName)) throw failure('E_NATIVE_ACCOUNT_UNVERIFIED', '准备流程的本人账户结果尚未验证。');
   const contacts = await rpc('contacts');
   requireContactSnapshot(contacts, runtime);
   if (contacts.self !== account.self || contacts.automaticMessagesSent !== 0) throw failure('E_CONTACT_SNAPSHOT', '准备流程的联系人快照账户或只读状态无效。');
   const history = await rpc('history', [{ to: account.self, limit: 1 }]);
-  requireHistory(history, host, account.self);
+  requireHistory(history, host, runtime);
   runtime = await rpc('inspect');
   requirePrepared(runtime, host);
-  if (runtime.self !== account.self || runtime.historyAvailable !== true) throw failure('E_NATIVE_HISTORY_UNVERIFIED', '实际本人历史查询后，agent 仍未确认本次运行的 history ABI 验证。');
+  if (runtime.self !== account.self || runtime.bindingRevision !== account.bindingRevision || runtime.historyAvailable !== true) throw failure('E_NATIVE_HISTORY_UNVERIFIED', '实际本人历史查询后，agent 仍未确认本次运行的 history ABI 验证。');
   return {
     source: 'reverse-native', prepared: true, ready: true, pid: host.pid, generation: host.generation,
     version: host.version, dllSha256: host.dllSha256, agentSourceSha256: sourceSha256,
-    self: account.self, displayName: account.displayName, accountVerified: true, readScopeVerified: true,
+    self: account.self, bindingRevision: runtime.bindingRevision, displayName: account.displayName, accountVerified: true, readScopeVerified: true,
     scope: 'current-account', contactCount: contacts.count, historyAvailable: true,
     historyValidation: { to: account.self, limit: 1 }, automaticMessagesSent: 0,
   };

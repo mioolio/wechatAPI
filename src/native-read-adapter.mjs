@@ -6,7 +6,10 @@ import { RecipientRegistry, recipientAlias } from './recipient-registry.mjs';
 import { WxError } from './errors.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
-export const NATIVE_READ_SCRIPT = 'readnative_live3';
+export const NATIVE_READ_SCRIPT = 'readnative_live4';
+export const LEGACY_NATIVE_READ_SCRIPTS = Object.freeze([
+  Object.freeze({ name: 'readnative_live3', sourceSha256: '44b0270432f8e695d579ba0d00af8334cd0cb1a0df410ffbb492645ad307513e' }),
+]);
 const isGeneration = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
 const isId = value => typeof value === 'string' && /^[A-Za-z0-9_.:@-]{1,256}$/.test(value);
 const isName = value => typeof value === 'string' && value.length <= 4096 && value.isWellFormed() && !value.includes('\0');
@@ -14,6 +17,7 @@ const isHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(valu
 const sameHash = (left, right) => isHash(left) && isHash(right) && left.toLowerCase() === right.toLowerCase();
 const isIntegerToken = value => typeof value === 'string' && /^\d{1,20}$/.test(value) && BigInt(value) <= 18446744073709551615n;
 const error = (code, message) => new WxError(code, message);
+export const isNativeAccountChanged = failure => failure?.code === 'E_ACCOUNT_CHANGED' || (failure?.code === 'E_OPERATION' && failure?.message === 'E_ACCOUNT_CHANGED');
 
 async function readJsonFile(path) {
   try {
@@ -24,7 +28,7 @@ async function readJsonFile(path) {
 
 /** Validate the complete cache snapshot before any registration or native history request. */
 export function requireContactSnapshot(snapshot, runtime) {
-  if (!snapshot || snapshot.pid !== runtime.pid || snapshot.generation !== runtime.generation || snapshot.scope !== 'loaded-contact-cache' || snapshot.complete !== false || snapshot.cacheSnapshotComplete !== true || !Array.isArray(snapshot.contacts) || snapshot.count !== snapshot.contacts.length || snapshot.count > 4096) throw error('E_CONTACT_SNAPSHOT', '原生联系人快照范围、代次或完整性校验失败。');
+  if (!snapshot || snapshot.pid !== runtime.pid || snapshot.generation !== runtime.generation || snapshot.bindingRevision !== runtime.bindingRevision || snapshot.scope !== 'loaded-contact-cache' || snapshot.complete !== false || snapshot.cacheSnapshotComplete !== true || !Array.isArray(snapshot.contacts) || snapshot.count !== snapshot.contacts.length || snapshot.count > 4096) throw error('E_CONTACT_SNAPSHOT', '原生联系人快照范围、代次或完整性校验失败。');
   const ids = new Set();
   for (const row of snapshot.contacts) {
     if (!row || !isId(row.username) || ids.has(row.username) || !isName(row.displayName)) throw error('E_CONTACT_SNAPSHOT', '原生联系人 ID 或名称校验失败；不会保存部分结果。');
@@ -34,7 +38,7 @@ export function requireContactSnapshot(snapshot, runtime) {
 }
 
 function requireAccount(result, runtime) {
-  if (!result || result.pid !== runtime.pid || result.generation !== runtime.generation || result.source !== 'reverse-native' || result.scope !== 'current-account' || result.self !== runtime.self || !isName(result.displayName) || result.accountVerified !== true || result.automaticMessagesSent !== 0) throw error('E_NATIVE_ACCOUNT_UNVERIFIED', '本人账户结果未通过当前运行代次与结构校验。');
+  if (!result || result.pid !== runtime.pid || result.generation !== runtime.generation || result.bindingRevision !== runtime.bindingRevision || result.source !== 'reverse-native' || result.scope !== 'current-account' || result.self !== runtime.self || !isName(result.displayName) || result.accountVerified !== true || result.automaticMessagesSent !== 0) throw error('E_NATIVE_ACCOUNT_UNVERIFIED', '本人账户结果未通过当前运行代次与结构校验。');
   return result;
 }
 
@@ -65,7 +69,10 @@ export class NativeReadAdapter {
 
   async call(method, args) {
     const response = await this.callImpl({ tokenFile: this.tokenFile, method, args });
-    if (response?.success !== true) throw error(response?.error?.code ?? 'E_NATIVE_READ_HOST', response?.error?.message ?? '常驻原生读取宿主未返回成功结果；不会自动重试。');
+    if (response?.success !== true) {
+      if (isNativeAccountChanged(response?.error)) throw error('E_ACCOUNT_CHANGED', '微信登录账号已变化，请运行 .\\wxcc.cmd start 重新验证当前账号后再试。');
+      throw error(response?.error?.code ?? 'E_NATIVE_READ_HOST', response?.error?.message ?? '常驻原生读取宿主未返回成功结果；不会自动重试。');
+    }
     return response.result;
   }
 
@@ -79,9 +86,9 @@ export class NativeReadAdapter {
     if (host.version !== descriptor.version || !sameHash(host.dllSha256, descriptor.dllSha256)) throw error('E_NATIVE_READ_VERSION', '读取宿主版本或 DLL SHA-256 与描述不匹配。');
     const runtime = await this.rpc('inspect');
     if (!runtime || runtime.pid !== host.pid || runtime.generation !== host.generation || runtime.version !== host.version || !sameHash(runtime.dllSha256, host.dllSha256)) throw error('E_NATIVE_READ_GENERATION', '原生读取 agent 的身份、版本或 DLL SHA-256 与宿主不匹配。');
-    if (runtime.accountVerified !== true || runtime.readScopeVerified !== true || runtime.ready !== true || runtime.automaticMessagesSent !== 0 || !isId(runtime.self) || runtime.self.includes('@chatroom') || runtime.self.startsWith('gh_')) throw error('E_NATIVE_READ_UNVERIFIED', '原生读取的本人账户、范围或只读状态尚未验证。');
-    if ((runtime.pendingTasks ?? 0) !== 0 || (runtime.pendingCallbacks ?? 0) !== 0) throw error('E_NATIVE_READ_BUSY', '读取 agent 存在未完成的原生任务或回调；不会继续排队读取。');
-    const key = JSON.stringify([runtime.pid, runtime.generation, runtime.self, runtime.dllSha256.toLowerCase()]);
+    if (runtime.accountVerified !== true || runtime.readScopeVerified !== true || runtime.ready !== true || runtime.automaticMessagesSent !== 0 || !Number.isSafeInteger(runtime.bindingRevision) || runtime.bindingRevision < 1 || !isId(runtime.self) || runtime.self.includes('@chatroom') || runtime.self.startsWith('gh_')) throw error('E_NATIVE_READ_UNVERIFIED', '原生读取的本人账户、范围或只读状态尚未验证。');
+    if ((runtime.pendingTasks ?? 0) !== 0 || (runtime.pendingCallbacks ?? 0) !== 0 || (runtime.activeReads ?? 0) !== 0 || runtime.rebinding === true) throw error('E_NATIVE_READ_BUSY', '读取 agent 存在未完成的原生任务或回调；不会继续排队读取。');
+    const key = JSON.stringify([runtime.pid, runtime.generation, runtime.self, runtime.bindingRevision, runtime.dllSha256.toLowerCase()]);
     if (this.contactsCache?.key !== key) this.contactsCache = null;
     return { ...runtime, source: 'reverse-native', attached: true, historyAvailable: runtime.historyAvailable === true, ready: true };
   }
@@ -101,7 +108,7 @@ export class NativeReadAdapter {
   }
 
   async contactSnapshot(runtime) {
-    const key = JSON.stringify([runtime.pid, runtime.generation, runtime.self, runtime.dllSha256.toLowerCase()]);
+    const key = JSON.stringify([runtime.pid, runtime.generation, runtime.self, runtime.bindingRevision, runtime.dllSha256.toLowerCase()]);
     if (this.contactsCache?.key === key) return this.contactsCache;
     const snapshot = await this.rpc('contacts');
     const ids = requireContactSnapshot(snapshot, runtime);
@@ -127,7 +134,7 @@ export class NativeReadAdapter {
     const runtime = await this.inspect();
     const snapshot = await this.contactSnapshot(runtime);
     const users = snapshot.users.filter(row => !keyword || row.displayName.includes(keyword) || row.alias.includes(keyword) || row.chatId.includes(keyword));
-    return { pid: runtime.pid, generation: runtime.generation, version: runtime.version, self: runtime.self, source: 'reverse-native', scope: 'loaded-contact-cache', complete: false, users, automaticMessagesSent: 0 };
+    return { pid: runtime.pid, generation: runtime.generation, bindingRevision: runtime.bindingRevision, version: runtime.version, self: runtime.self, source: 'reverse-native', scope: 'loaded-contact-cache', complete: false, users, automaticMessagesSent: 0 };
   }
 
   async history({ to, limit = 30 } = {}) {
@@ -153,7 +160,7 @@ export class NativeReadAdapter {
       if (!snapshot.ids.has(chatId)) throw error('E_CHAT_SCOPE', '目标不在当前已验证的联系人快照中；不会按昵称或旧登记猜测。');
     }
     const result = await this.rpc('history', [{ to: chatId, limit }]);
-    if (!result || result.pid !== runtime.pid || result.generation !== runtime.generation || result.self !== runtime.self || result.chatId !== chatId || result.source !== 'reverse-native' || result.schemaValidated !== true || result.automaticMessagesSent !== 0 || !Array.isArray(result.messages) || result.messages.length > limit) throw error('E_NATIVE_HISTORY_SCHEMA', '历史读取结果的会话、账户、运行代次或结构未通过校验。');
+    if (!result || result.pid !== runtime.pid || result.generation !== runtime.generation || result.bindingRevision !== runtime.bindingRevision || result.self !== runtime.self || result.chatId !== chatId || result.source !== 'reverse-native' || result.schemaValidated !== true || result.automaticMessagesSent !== 0 || !Array.isArray(result.messages) || result.messages.length > limit) throw error('E_NATIVE_HISTORY_SCHEMA', '历史读取结果的会话、账户、运行代次或结构未通过校验。');
     const messages = result.messages.map(row => normalizeHistoryMessage(row, { self: runtime.self, chatId }));
     return { ...result, messages, historyAvailable: true };
   }

@@ -92,6 +92,31 @@ function saltMatches(bytes, offset, salt) {
   for (let index = 0; index < 16; index++) if (((nibble(bytes[offset + index * 2]) << 4) | nibble(bytes[offset + index * 2 + 1])) !== salt[index] || nibble(bytes[offset + index * 2]) < 0 || nibble(bytes[offset + index * 2 + 1]) < 0) return false;
   return true;
 }
+function keyspecKey(bytes, salt) {
+  if (bytes.length !== 99 || ![0x78, 0x58].includes(bytes[0]) || bytes[1] !== 0x27 || bytes[98] !== 0x27 || !saltMatches(bytes, 66, salt)) return null;
+  return decodeHex(bytes, 2, 32);
+}
+function maskedKeyspecKey(bytes, salt) {
+  // Observed on Weixin 4.1.15.13's legacy codec: a 99-byte raw keyspec is
+  // shielded with a repeating 32-byte mask. Its known salt occupies 66..97,
+  // covering every mask slot exactly once. Work exclusively on local copies.
+  // This only decodes a candidate; first-page authentication remains mandatory.
+  if (bytes.length !== 99 || salt.length !== 16) return null;
+  const known = Buffer.alloc(32), mask = Buffer.alloc(32), decoded = Buffer.alloc(99);
+  try {
+    for (const alphabet of ['0123456789abcdef', '0123456789ABCDEF']) {
+      for (let i = 0; i < salt.length; i++) {
+        known[i * 2] = alphabet.charCodeAt(salt[i] >>> 4);
+        known[i * 2 + 1] = alphabet.charCodeAt(salt[i] & 15);
+      }
+      for (let i = 0; i < 32; i++) mask[(66 + i) % 32] = bytes[66 + i] ^ known[i];
+      for (let i = 0; i < 99; i++) decoded[i] = bytes[i] ^ mask[i % 32];
+      const key = keyspecKey(decoded, salt);
+      if (key) return key;
+    }
+    return null;
+  } finally { known.fill(0); mask.fill(0); decoded.fill(0); }
+}
 function profileList(values = SUPPORTED_CIPHER_PROFILES) {
   if (!Array.isArray(values) || !values.length || values.length > 3) fail('E_DB_CIPHER_PROFILE', '密钥验证参数候选无效。');
   return [...new Set(values.map(value => typeof value === 'string' ? value : value?.id))].map(id => {
@@ -112,7 +137,8 @@ function codecSignatures(profiles) {
 }
 function guardIdentity(value, pid) {
   if (!value || value.pid !== pid || value.accountVerified !== true || typeof value.self !== 'string' || value.self.length < 1 || value.self.length > 256 || /[\0\r\n]/.test(value.self) || value.self.endsWith('@chatroom') || typeof value.generation !== 'string' || !value.generation || value.generation.length > 128) fail('E_DB_KEY_ACCOUNT', '密钥扫描需要已验证的当前微信账号与运行代次。');
-  return { pid, self: value.self, generation: value.generation };
+  if (value.bindingRevision !== undefined && (!Number.isSafeInteger(value.bindingRevision) || value.bindingRevision < 1)) fail('E_DB_KEY_ACCOUNT', '账号绑定修订号无效。');
+  return { pid, self: value.self, generation: value.generation, bindingRevision: value.bindingRevision };
 }
 function publicKeyResult(key, mode, salt, verified) {
   const result = { found: true, mode, ...(verified?.profile ? { profile: verified.profile } : {}) };
@@ -129,7 +155,7 @@ function publicKeyResult(key, mode, salt, verified) {
  * Dependencies are injectable for tests; no test needs a real target process.
  */
 export async function findDatabaseKey(options = {}, deps = {}) {
-  const { pid, expectedExePath, firstPage, accountGuard, maxMemoryBytes = 512 * 1024 * 1024, timeoutMs = 15000, maxCandidates = 128, maxPassphraseCandidates = 2, maxContextCandidates = 64, maxPointerReads = 256, chunkSize = 1024 * 1024, maxRegions = 65536 } = options;
+  const { pid, expectedExePath, firstPage, accountGuard, maxMemoryBytes = 512 * 1024 * 1024, timeoutMs = 15000, maxCandidates = 128, maxPassphraseCandidates = 2, maxContextCandidates = 128, maxPointerReads = 256, chunkSize = 1024 * 1024, maxRegions = 65536 } = options;
   if ((deps.platform ?? process.platform) !== 'win32' || (deps.arch ?? process.arch) !== 'x64') fail('E_DB_KEY_PLATFORM', '自动密钥候选获取仅支持 Windows x64。');
   if (!Number.isSafeInteger(pid) || pid < 1 || pid > 0xffffffff || typeof expectedExePath !== 'string' || !path.win32.isAbsolute(expectedExePath) || path.win32.basename(expectedExePath).toLowerCase() !== 'weixin.exe') fail('E_DB_KEY_PROCESS', '需要已验证的微信 PID 与绝对映像路径。');
   if (!(firstPage instanceof Uint8Array) || firstPage.length < 1024 || firstPage.length > 65536 || Buffer.from(firstPage).subarray(0, 16).equals(SQLITE_HEADER)) fail('E_DB_HEADER', '密钥扫描需要加密数据库首页面。');
@@ -265,14 +291,12 @@ export async function findDatabaseKey(options = {}, deps = {}) {
                   keyspec = await readPointer(cipher.readBigUInt64LE(32), 99, bytes, windowAddress);
                   if (keyspec) {
                     contextKeyspecReads++;
-                    if ([0x78, 0x58].includes(keyspec[0]) && keyspec[1] === 0x27 && keyspec[98] === 0x27 && saltMatches(keyspec, 66, salt)) {
+                    candidate = keyspecKey(keyspec, salt) ?? maskedKeyspecKey(keyspec, salt);
+                    if (candidate) {
                       contextKeyspecMatches++;
-                      candidate = decodeHex(keyspec, 2, 32);
-                      if (candidate) {
-                        const result = await tryPrimary(candidate); candidate = null;
-                        if (result.checked) contextKeyspecRawChecks++;
-                        if (selected) return;
-                      }
+                      const result = await tryPrimary(candidate); candidate = null;
+                      if (result.checked) contextKeyspecRawChecks++;
+                      if (selected) return;
                     }
                   }
                 }
@@ -362,7 +386,7 @@ export async function findDatabaseKey(options = {}, deps = {}) {
     }
     await requireImage();
     finalIdentity = guardIdentity(await bounded(() => accountGuard({ phase: 'after', pid })), pid);
-    if (beforeIdentity.self !== finalIdentity.self || beforeIdentity.generation !== finalIdentity.generation) fail('E_DB_KEY_ACCOUNT_CHANGED', '扫描期间微信账号或运行代次发生变化。');
+    if (beforeIdentity.self !== finalIdentity.self || beforeIdentity.generation !== finalIdentity.generation || beforeIdentity.bindingRevision !== finalIdentity.bindingRevision) fail('E_DB_KEY_ACCOUNT_CHANGED', '扫描期间微信账号、绑定修订或运行代次发生变化。');
     if (!selected) fail('E_DB_KEY_NOT_FOUND', '在有限只读范围内未找到通过页面认证的密钥候选。');
     return selected;
   } catch (error) {

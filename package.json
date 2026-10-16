@@ -1,6 +1,6 @@
 {
   "name": "wxcc",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Local Weixin CLI with native history reading, reversible local history copy editing, native text sending and WeFlow adapters",

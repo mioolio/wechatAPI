@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { bootstrapNativeRead } from '../src/native-read-bootstrap.mjs';
-import { NATIVE_READ_SCRIPT } from '../src/native-read-adapter.mjs';
+import { NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS } from '../src/native-read-adapter.mjs';
 import { parseCli as parseHostArgs } from '../src/native-runtime-host.mjs';
 
 const generation = '10000000-0000-4000-8000-000000000001';
@@ -16,10 +16,10 @@ function fixture(changes = {}) {
   const descriptor = { host: '127.0.0.1', port: 5001, token: 'b'.repeat(64), pid: 1234, generation, version: '4.1.15.13', dllSha256: sha, ...changes.descriptor };
   const host = { pid: 1234, generation, version: '4.1.15.13', dllSha256: sha, status: 'ready', attached: true, verified: true, scripts: [], ...changes.host };
   const profile = { version: '4.1.15.13', architecture: 'x64', dllSha256: sha, ...changes.profile };
-  let runtime = { pid: 1234, generation: null, self: null, version: '4.1.15.13', dllSha256: sha, ready: false, accountVerified: false, readScopeVerified: false, automaticMessagesSent: 0, historyAvailable: false, pendingTasks: 0, pendingCallbacks: 0, ...changes.runtime };
-  const account = { pid: 1234, generation, source: 'reverse-native', scope: 'current-account', self, displayName: 'Fixture Account', accountVerified: true, automaticMessagesSent: 0, ...changes.account };
-  const contacts = { pid: 1234, generation, self, scope: 'loaded-contact-cache', complete: false, cacheSnapshotComplete: true, count: 1, contacts: [{ username: 'fixture_contact', displayName: 'Fixture Contact' }], automaticMessagesSent: 0, ...changes.contacts };
-  const history = { pid: 1234, generation, self, chatId: self, source: 'reverse-native', messages: [{ serverId: '18446744073709551615', type: '1', createTime: '1790908800', content: 'Mock self history', senderUsername: self }], schemaValidated: true, automaticMessagesSent: 0, ...changes.history };
+  let runtime = { pid: 1234, generation: null, self: null, bindingRevision: 1, version: '4.1.15.13', dllSha256: sha, ready: false, accountVerified: false, readScopeVerified: false, automaticMessagesSent: 0, historyAvailable: false, pendingTasks: 0, pendingCallbacks: 0, ...changes.runtime };
+  const account = { pid: 1234, generation, bindingRevision: 1, source: 'reverse-native', scope: 'current-account', self, displayName: 'Fixture Account', accountVerified: true, automaticMessagesSent: 0, ...changes.account };
+  const contacts = { pid: 1234, generation, bindingRevision: 1, self, scope: 'loaded-contact-cache', complete: false, cacheSnapshotComplete: true, count: 1, contacts: [{ username: 'fixture_contact', displayName: 'Fixture Contact' }], automaticMessagesSent: 0, ...changes.contacts };
+  const history = { pid: 1234, generation, bindingRevision: 1, self, chatId: self, source: 'reverse-native', messages: [{ serverId: '18446744073709551615', type: '1', createTime: '1790908800', content: 'Mock self history', senderUsername: self }], schemaValidated: true, automaticMessagesSent: 0, ...changes.history };
   const options = { workspace: 'C:/mock-workspace', tokenFile: 'read-host.json', profileFile: 'profile.json' };
   const dependencies = {
     readJsonImpl: async path => { reads.push(path); return path === options.tokenFile ? descriptor : profile; },
@@ -30,11 +30,15 @@ function fixture(changes = {}) {
       if (request.method === 'status') return { success: true, result: host };
       if (request.method === 'load') return { success: true, result: { name: NATIVE_READ_SCRIPT, path: 'C:/mock-workspace/agents/read-native.js', loaded: true, sourceSha256, ...changes.loaded } };
       assert.equal(request.method, 'rpc');
+      if (request.args.name === LEGACY_NATIVE_READ_SCRIPTS[0].name) return { success: true, result: { ...runtime, generation, ...changes.legacyRuntime } };
       assert.equal(request.args.name, NATIVE_READ_SCRIPT);
       switch (request.args.method) {
         case 'inspect': return { success: true, result: runtime };
         case 'prepare': runtime = { ...runtime, ...request.args.params[0], self, ready: true, accountVerified: true, readScopeVerified: true, ...changes.prepared }; return { success: true, result: runtime };
-        case 'account': return { success: true, result: account };
+        case 'account':
+          if (changes.accountError) { const problem = changes.accountError; changes.accountError = null; return { success: false, error: problem }; }
+          return { success: true, result: account };
+        case 'rebind': runtime = { ...runtime, self, bindingRevision: account.bindingRevision, historyAvailable: false, contactSnapshotAvailable: false, ...changes.rebound }; return { success: true, result: runtime };
         case 'contacts': return { success: true, result: contacts };
         case 'history':
           if (changes.historyError) throw Object.assign(new Error('Mock read query failed.'), { code: 'E_READ_RANGE' });
@@ -76,6 +80,54 @@ test('a matching prepared script is reused without replacement and still verifie
   assert.deepEqual(operations(fx.calls), [['status', undefined], ['rpc', 'inspect'], ['rpc', 'account'], ['rpc', 'contacts'], ['rpc', 'history'], ['rpc', 'inspect']]);
 });
 
+test('a known legacy read agent is checked idle and kept loaded while the new name is prepared', async () => {
+  const legacy = { ...LEGACY_NATIVE_READ_SCRIPTS[0], loaded: true, destroyed: false };
+  const fx = fixture({ host: { scripts: [legacy] } });
+  assert.equal((await bootstrapNativeRead(fx.options, fx.dependencies)).ready, true);
+  assert.deepEqual(fx.calls.slice(0, 3).map(row => [row.method, row.args.name, row.args.method]), [['status', undefined, undefined], ['rpc', legacy.name, 'inspect'], ['load', NATIVE_READ_SCRIPT, undefined]]);
+  assert.equal(fx.calls.some(row => ['unload', 'detach', 'stop'].includes(row.method)), false);
+});
+
+test('unknown, changed or busy legacy agents prevent loading another agent', async () => {
+  const legacy = { ...LEGACY_NATIVE_READ_SCRIPTS[0], loaded: true, destroyed: false };
+  for (const changes of [
+    { host: { scripts: [{ ...legacy, sourceSha256: 'c'.repeat(64) }] } },
+    { host: { scripts: [{ ...legacy, name: 'readnative_live2' }] } },
+    { host: { scripts: [legacy] }, legacyRuntime: { pendingTasks: 1 } },
+    { host: { scripts: [legacy] }, legacyRuntime: { runtimeBlocked: true } },
+  ]) {
+    const fx = fixture(changes);
+    await assert.rejects(bootstrapNativeRead(fx.options, fx.dependencies));
+    assert.equal(fx.calls.some(row => row.method === 'load'), false);
+  }
+});
+
+test('only explicit start recovery rebinds one changed account and proves the new contact/history scope', async () => {
+  for (const accountError of [{ code: 'E_ACCOUNT_CHANGED', message: 'E_ACCOUNT_CHANGED' }, { code: 'E_OPERATION', message: 'E_ACCOUNT_CHANGED' }]) {
+    const fx = fixture({ runtime: { generation, self: 'fixture_old_self', ready: true, accountVerified: true, readScopeVerified: true, historyAvailable: true }, accountError, account: { bindingRevision: 2 }, contacts: { bindingRevision: 2 }, history: { bindingRevision: 2 } });
+    const result = await bootstrapNativeRead({ ...fx.options, rebindAccount: true }, fx.dependencies);
+    assert.equal(result.bindingRevision, 2);
+    const recovery = fx.calls.filter(row => row.args?.method === 'rebind');
+    assert.equal(recovery.length, 1);
+    assert.deepEqual(recovery[0].args.params, [{ pid: 1234, generation, dllSha256: sha, expectedSelf: 'fixture_old_self', expectedBindingRevision: 1 }]);
+    assert.equal(fx.calls.filter(row => row.args?.method === 'history').length, 1);
+  }
+});
+
+test('ordinary bootstrap and unrelated failures never silently rebind an account', async () => {
+  for (const [rebindAccount, accountError] of [[false, { code: 'E_ACCOUNT_CHANGED', message: 'E_ACCOUNT_CHANGED' }], [true, { code: 'E_OPERATION', message: 'E_ACCOUNT_CHANGED: unknown native outcome' }], [true, { code: 'E_TIMEOUT_UNKNOWN', message: 'Mock timeout' }]]) {
+    const fx = fixture({ accountError });
+    await assert.rejects(bootstrapNativeRead({ ...fx.options, rebindAccount }, fx.dependencies));
+    assert.equal(fx.calls.some(row => row.args?.method === 'rebind'), false);
+  }
+});
+
+test('recovery with uncleared old capabilities fails before contacts or history', async () => {
+  const fx = fixture({ runtime: { generation, self, ready: true, accountVerified: true, readScopeVerified: true }, accountError: { code: 'E_ACCOUNT_CHANGED', message: 'E_ACCOUNT_CHANGED' }, rebound: { historyAvailable: true } });
+  await assert.rejects(bootstrapNativeRead({ ...fx.options, rebindAccount: true }, fx.dependencies), { code: 'E_NATIVE_READ_SCOPE' });
+  assert.equal(fx.calls.some(row => row.args?.method === 'contacts' || row.args?.method === 'history'), false);
+});
+
 test('stale identity or different profile fails before loading any agent', async () => {
   for (const changes of [
     { descriptor: { host: 'remote.example' } }, { descriptor: { pid: 9999 } }, { descriptor: { generation: '10000000-0000-4000-8000-000000000002' } },
@@ -115,7 +167,7 @@ test('unprepared or prepared metadata must strictly verify the read identity and
     { runtime: { pid: 9999 } }, { runtime: { version: '4.1.10.27' } }, { runtime: { dllSha256: 'c'.repeat(64) } },
     { runtime: { automaticMessagesSent: '0' } }, { runtime: { pendingTasks: 1 } }, { runtime: { pendingCallbacks: 1 } },
     { runtime: { generation: '10000000-0000-4000-8000-000000000002', ready: true } },
-    { prepared: { ready: false } }, { prepared: { readScopeVerified: 1 } }, { prepared: { accountVerified: false } },
+    { prepared: { ready: false } }, { prepared: { readScopeVerified: 1 } }, { prepared: { accountVerified: false } }, { prepared: { bindingRevision: undefined } }, { prepared: { bindingRevision: 0 } },
     { prepared: { self: '10001@chatroom' } }, { prepared: { self: 'gh_fixture' } }, { prepared: { pid: 9999 } },
   ]) {
     const fx = fixture(changes);

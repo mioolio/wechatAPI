@@ -1,21 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createCipheriv, createHmac, pbkdf2Sync } from 'node:crypto';
+import { createCipheriv, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { findDatabaseKey, createWin32DatabaseKeyApi, DATABASE_KEY_PROCESS_ACCESS } from '../src/database-key-provider.mjs';
-import { SUPPORTED_CIPHER_PROFILES } from '../src/database-decrypt.mjs';
+import { SUPPORTED_CIPHER_PROFILES, verifyDatabaseKey } from '../src/database-decrypt.mjs';
 
 const expectedExePath = 'C:\\synthetic\\Weixin.exe';
 const key = Buffer.alloc(32, 0x61), salt = Buffer.alloc(16, 0x27);
 const profile = SUPPORTED_CIPHER_PROFILES[0];
-const identity = { pid: 123, self: 'synthetic_self', generation: 'synthetic-generation', accountVerified: true };
+const identity = { pid: 123, self: 'synthetic_self', generation: 'synthetic-generation', bindingRevision: 1, accountVerified: true };
 const codeIs = code => error => error.code === code;
-function firstPage(mode = 'raw', headerReserve = 80) {
+function firstPage(mode = 'raw', headerReserve = 80, material = key, databaseSalt = salt) {
   const plain = Buffer.alloc(4096); plain.writeUInt16BE(4096, 16);
   plain[18] = 1; plain[19] = 1; plain[20] = headerReserve; plain[21] = 64; plain[22] = 32; plain[23] = 32;
-  const aes = mode === 'raw' ? key : pbkdf2Sync(key, salt, 256000, 32, 'sha512');
-  const auth = pbkdf2Sync(aes, Buffer.from(salt.map(byte => byte ^ 0x3a)), 2, 32, 'sha512');
+  const aes = mode === 'raw' ? material : pbkdf2Sync(material, databaseSalt, 256000, 32, 'sha512');
+  const auth = pbkdf2Sync(aes, Buffer.from(databaseSalt.map(byte => byte ^ 0x3a)), 2, 32, 'sha512');
   const iv = Buffer.alloc(16, 9), result = Buffer.alloc(4096), cipher = createCipheriv('aes-256-cbc', aes, iv);
-  cipher.setAutoPadding(false); salt.copy(result);
+  cipher.setAutoPadding(false); databaseSalt.copy(result);
   Buffer.concat([cipher.update(plain.subarray(16, 4016)), cipher.final()]).copy(result, 16); iv.copy(result, 4016);
   const pgno = Buffer.alloc(4); pgno.writeUInt32LE(1);
   createHmac('sha512', auth).update(result.subarray(16, 4032)).update(pgno).digest().copy(result, 4032);
@@ -69,6 +69,21 @@ function binaryFixture(layout, overrides = {}) {
   const f = setup(memory, { maxMemoryBytes: 8192, maxPassphraseCandidates: 0 });
   f.deps.winapi = mockReader([{ base, bytes: memory }]);
   return { ...f, base, memory, saltOffset, cipherOffset, keyOffset };
+}
+function maskedKeyspecFixture({ candidate = key, pageKey = key, databaseSalt = salt, blobSalt = databaseSalt, uppercase = false, mask = randomBytes(32), blobLength = 99 } = {}) {
+  // Keep the source bytes out of globally scanned writable memory: success must
+  // follow the legacy cipher_ctx.keyspec pointer, decode and authenticate it.
+  const f = binaryFixture('legacy', { key: Buffer.alloc(32, 8), salt: databaseSalt, keyspecBytes: 99 });
+  const blobBase = 131072;
+  let text = `x'${candidate.toString('hex')}${blobSalt.toString('hex')}'`;
+  if (uppercase) text = text.toUpperCase();
+  const plaintext = Buffer.from(text), shielded = Buffer.alloc(blobLength);
+  for (let index = 0; index < shielded.length; index++) shielded[index] = plaintext[index] ^ mask[index % 32];
+  plaintext.fill(0);
+  f.memory.writeBigUInt64LE(BigInt(blobBase), f.cipherOffset + 32);
+  f.options.firstPage = firstPage('raw', 80, pageKey, databaseSalt);
+  f.deps.winapi = mockReader([{ base: f.base, bytes: f.memory }, { base: blobBase, bytes: shielded, protect: 0x02 }]);
+  return { ...f, blobBase, shielded };
 }
 
 test('salt-matched raw blob crosses chunks; read access, account guards and privacy hold', async () => {
@@ -255,6 +270,99 @@ test('legacy keyspec pointer is bounded and authenticates a salt-matched blob in
     assert.equal(error.details.contextKeyspecReads, 1); assert.equal(error.details.contextKeyspecMatches, 0);
     return error.code === 'E_DB_KEY_NOT_FOUND';
   });
+});
+
+test('masked legacy keyspec authenticates random 32-byte masks, lowercase and uppercase blobs without writing memory', async () => {
+  for (const uppercase of [false, true]) {
+    const mask = randomBytes(32); mask[0] = 0; mask[1] = 0x80; mask[31] = 0xff;
+    const pageKey = Buffer.alloc(32, 0xab), databaseSalt = Buffer.from('c1a23456b7e89fd00112233445566778', 'hex');
+    const f = maskedKeyspecFixture({ candidate: pageKey, pageKey, databaseSalt, uppercase, mask });
+    const sourceBefore = Buffer.from(f.memory), blobBefore = Buffer.from(f.shielded), modes = [], candidateBuffers = [];
+    f.options.verifyCandidate = params => { modes.push(params.mode); candidateBuffers.push(params.key); return verifyDatabaseKey(params); };
+    const result = await findDatabaseKey(f.options, f.deps);
+    try {
+      assert.deepEqual(result.key, pageKey); assert.deepEqual(result.salt, databaseSalt);
+      assert.equal(result.profile.id, profile.id); assert.equal(result.mode, 'raw'); assert.deepEqual(modes, ['raw']);
+      assert.deepEqual(f.guards, ['before', 'after']);
+      assert.deepEqual(f.deps.winapi.calls[0], ['open', identity.pid, DATABASE_KEY_PROCESS_ACCESS]);
+      assert.equal(f.deps.winapi.calls.filter(call => call[0] === 'close').length, 1);
+      assert.ok(f.deps.winapi.calls.every(call => ['open', 'image', 'query', 'read', 'close'].includes(call[0])));
+      assert.deepEqual(f.memory, sourceBefore); assert.deepEqual(f.shielded, blobBefore);
+      assert.ok(f.deps.winapi.readBuffers.every(bytes => bytes.every(value => value === 0)));
+      assert.ok(candidateBuffers.every(bytes => bytes.every(value => value === 0)));
+      assert.equal(Object.keys(result).includes('key'), false); assert.equal(Object.keys(result).includes('salt'), false);
+      for (const privateValue of [pageKey.toString('hex'), databaseSalt.toString('hex'), mask.toString('hex'), expectedExePath]) assert.equal(JSON.stringify(result).includes(privateValue), false);
+    } finally { result.key.fill(0); result.salt.fill(0); mask.fill(0); pageKey.fill(0); sourceBefore.fill(0); blobBefore.fill(0); }
+  }
+});
+
+test('masked keyspec rejects another salt and never accepts a formatted but unauthenticated AES key', async () => {
+  for (const failure of ['salt', 'key']) {
+    const f = maskedKeyspecFixture(failure === 'salt' ? { blobSalt: Buffer.alloc(16, 0x8e) } : { candidate: Buffer.alloc(32, 9) });
+    await assert.rejects(findDatabaseKey(f.options, f.deps), error => {
+      assert.equal(error.code, 'E_DB_KEY_NOT_FOUND');
+      assert.equal(error.details.contextKeyspecReads, 1);
+      assert.equal(error.details.contextKeyspecMatches, failure === 'key' ? 1 : 0);
+      assert.ok(error.details.hmacFailures >= 1);
+      assert.equal(JSON.stringify(error).includes(key.toString('hex')), false);
+      assert.ok(Object.values(error.details).every(value => Number.isSafeInteger(value) && value >= 0));
+      return true;
+    });
+    assert.deepEqual(f.guards, ['before', 'after']);
+    assert.ok(f.deps.winapi.readBuffers.every(bytes => bytes.every(value => value === 0)));
+    assert.equal(f.deps.winapi.calls.at(-1)[0], 'close');
+  }
+});
+
+test('masked keyspec validates the full raw blob format before AES authentication', async () => {
+  for (const [offset, original, invalid] of [[0, 0x78, 0x7a], [1, 0x27, 0x21], [2, 0x36, 0x67], [98, 0x27, 0x21]]) {
+    const f = maskedKeyspecFixture();
+    f.shielded[offset] ^= original ^ invalid;
+    await assert.rejects(findDatabaseKey(f.options, f.deps), error => {
+      assert.equal(error.code, 'E_DB_KEY_NOT_FOUND');
+      assert.equal(error.details.contextKeyspecReads, 1); assert.equal(error.details.contextKeyspecMatches, 0);
+      return true;
+    });
+    assert.ok(f.deps.winapi.readBuffers.every(bytes => bytes.every(value => value === 0)));
+  }
+});
+
+test('masked keyspec requires a complete 99-byte readable region and wipes short-read buffers', async () => {
+  for (const partialRead of [false, true]) {
+    const f = maskedKeyspecFixture({ blobLength: partialRead ? 99 : 98 });
+    if (partialRead) {
+      const read = f.deps.winapi.readMemory;
+      f.deps.winapi.readMemory = (...args) => {
+        const result = read(...args);
+        return args[1] === BigInt(f.blobBase) ? { ...result, bytesRead: result.bytesRead - 1 } : result;
+      };
+    }
+    await assert.rejects(findDatabaseKey(f.options, f.deps), error => {
+      assert.equal(error.code, 'E_DB_KEY_NOT_FOUND');
+      assert.equal(error.details.contextKeyspecReads, 0); assert.equal(error.details.contextKeyspecMatches, 0);
+      assert.equal(error.details.readFailures, partialRead ? 1 : 0);
+      return true;
+    });
+    assert.ok(f.deps.winapi.readBuffers.every(bytes => bytes.every(value => value === 0)));
+    assert.equal(f.deps.winapi.calls.at(-1)[0], 'close');
+  }
+});
+
+test('masked keyspec preserves verified account guards before and after candidate acquisition', async () => {
+  const unverified = maskedKeyspecFixture();
+  unverified.options.accountGuard = () => ({ ...identity, accountVerified: false });
+  await assert.rejects(findDatabaseKey(unverified.options, unverified.deps), codeIs('E_DB_KEY_ACCOUNT'));
+  assert.equal(unverified.deps.winapi.calls.length, 0);
+  for (const changed of [{ self: 'synthetic_other' }, { generation: 'synthetic-other-generation' }, { bindingRevision: 2 }]) {
+    const f = maskedKeyspecFixture();
+    const phases = []; let authenticates = 0;
+    f.options.accountGuard = ({ phase }) => { phases.push(phase); return { ...identity, ...(phase === 'after' ? changed : {}) }; };
+    f.options.verifyCandidate = params => { const result = verifyDatabaseKey(params); if (result.valid) authenticates++; return result; };
+    await assert.rejects(findDatabaseKey(f.options, f.deps), codeIs('E_DB_KEY_ACCOUNT_CHANGED'));
+    assert.equal(authenticates, 1); assert.deepEqual(phases, ['before', 'after']);
+    assert.ok(f.deps.winapi.readBuffers.every(bytes => bytes.every(value => value === 0)));
+    assert.equal(f.deps.winapi.calls.filter(call => call[0] === 'close').length, 1);
+  }
 });
 
 test('binary context bad salt/key/null or noncanonical pointers never yield a candidate', async () => {

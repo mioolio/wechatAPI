@@ -268,6 +268,19 @@ async function candidates({ key, keyFile, keyProvider, keyMode = 'raw' }, contex
   } catch (error) { for (const candidate of result) { candidate.key.fill(0); candidate.salt?.fill(0); } throw error; }
   finally { fileKey?.fill(0); }
 }
+function missingClientTokenizer(database) {
+  try {
+    const tables = database.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND sql IS NOT NULL LIMIT 4097").all();
+    if (tables.length > 4096) return false;
+    for (const table of tables) {
+      if (typeof table.name !== 'string' || table.name.length > 4096 || !/\bUSING\s+fts5\s*\(/i.test(table.sql) || !/\bMMFtsTokenizer\b/i.test(table.sql)) continue;
+      const name = `"${table.name.replaceAll('"', '""')}"`;
+      try { database.prepare(`SELECT rowid FROM ${name} WHERE ${name} MATCH ? LIMIT 1`).get('wxcc_tokenizer_check'); }
+      catch (error) { if (/no such tokenizer\s*:\s*MMFtsTokenizer(?:\s|$)/i.test(error.message)) return true; }
+    }
+  } catch { /* Diagnostic failure cannot turn an integrity error into success. */ }
+  return false;
+}
 async function quickCheck(filename) {
   let database;
   try {
@@ -279,7 +292,11 @@ async function quickCheck(filename) {
     const rows = database.prepare('PRAGMA quick_check').all();
     if (rows.length !== 1 || Object.values(rows[0])[0] !== 'ok') fail('E_DB_INTEGRITY', '解密副本未通过 SQLite quick_check。');
     return { quickCheck: 'ok', schemaObjects: Number(schemaCount) };
-  } catch (error) { if (error instanceof WxError) throw error; fail('E_DB_INTEGRITY', '解密副本无法通过 SQLite schema 与 quick_check 验证。'); }
+  } catch (error) {
+    if (error instanceof WxError) throw error;
+    if (database && missingClientTokenizer(database)) fail('E_DB_SQLITE_TOKENIZER', '页面认证已通过，但搜索索引需要微信专用分词器，当前 SQLite 无法完成验证；未发布副本。聊天正文请选择 role:message-history。');
+    fail('E_DB_INTEGRITY', '解密副本无法通过 SQLite schema 与 quick_check 验证。');
+  }
   finally { database?.close(); }
 }
 async function writeAll(file, bytes, position) {

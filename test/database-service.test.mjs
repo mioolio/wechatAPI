@@ -4,7 +4,7 @@ import { createDatabaseService, databaseAlias } from '../src/database-service.mj
 import { redact } from '../src/privacy.mjs';
 
 const self = 'wxid_demo_self';
-const account = { self, pid: 100, generation: 'demo-generation', accountVerified: true, automaticMessagesSent: 0, displayName: '演示账号' };
+const account = { self, pid: 100, generation: 'demo-generation', bindingRevision: 1, accountVerified: true, automaticMessagesSent: 0, displayName: '演示账号' };
 function harness(extra = {}, options = {}) {
   const database = { relativePath: 'message/message_0.db', path: 'D:\\private\\encrypted.db' };
   const calls = [];
@@ -30,6 +30,7 @@ test('discovery exposes stable metadata without claiming cryptographic ownership
   assert.equal(result.accountVerified, false);
   assert.equal(result.databases[0].alias, databaseAlias(self, 'message/message_0.db'));
   assert.equal(result.databases[0].kind, 'message');
+  assert.equal(result.databases[0].role, 'message-history');
   assert.ok(!JSON.stringify(result).includes('private'));
   assert.equal(h.calls.length, 0);
 });
@@ -58,4 +59,56 @@ test('online key-file export rechecks owner before publication', async () => {
   let reads = 0;
   const h = harness({ accountProvider: async () => ++reads < 3 ? account : { ...account, self: 'wxid_other' } }, { 'key-file': 'key.txt' });
   await assert.rejects(() => h.service.execute({ action: 'decrypt', database: databaseAlias(self, 'message/message_0.db'), output: 'copy.sqlite' }), { code: 'E_DB_ACCOUNT_CHANGED' });
+});
+
+test('a changed binding revision blocks automatic key scanning even when self and generation match', async () => {
+  let scans = 0;
+  const h = harness({
+    inspectProvider: async () => ({ ...account, bindingRevision: 2, readScopeVerified: true, version: '4.1.15.13', dllSha256: 'a'.repeat(64) }),
+    findKey: async () => { scans++; throw new Error('key scan must not start'); },
+  });
+  await assert.rejects(h.service.execute({ action: 'decrypt', database: databaseAlias(self, 'message/message_0.db'), output: 'copy.sqlite' }), { code: 'E_DB_ACCOUNT_CHANGED' });
+  assert.equal(scans, 0);
+});
+
+test('the key-scan account guard rejects a revision change without publishing a copy', async () => {
+  let revision = 1, scans = 0, published = false;
+  const h = harness({
+    accountProvider: async () => ({ ...account, bindingRevision: revision }),
+    findKey: async ({ accountGuard }) => {
+      scans++;
+      revision = 2;
+      await accountGuard();
+      throw new Error('changed binding must not produce a key');
+    },
+    decrypt: async args => {
+      await args.keyProvider({ firstPage: Buffer.alloc(4096), profiles: [] });
+      await args.beforePublish();
+      published = true;
+      return { ok: true, quickCheck: 'ok' };
+    },
+  });
+  await assert.rejects(h.service.execute({ action: 'decrypt', database: databaseAlias(self, 'message/message_0.db'), output: 'copy.sqlite' }), { code: 'E_DB_ACCOUNT_CHANGED' });
+  assert.equal(scans, 1);
+  assert.equal(published, false);
+});
+
+test('a revision change after key acquisition prevents publication and wipes acquired secrets', async () => {
+  let revision = 1, published = false;
+  const key = Buffer.alloc(32, 0xab), salt = Buffer.alloc(16, 0xcd);
+  const h = harness({
+    accountProvider: async () => ({ ...account, bindingRevision: revision }),
+    findKey: async ({ accountGuard }) => { await accountGuard(); return { key, salt, mode: 'raw' }; },
+    decrypt: async args => {
+      await args.keyProvider({ firstPage: Buffer.alloc(4096), profiles: [] });
+      revision = 2;
+      await args.beforePublish();
+      published = true;
+      return { ok: true, quickCheck: 'ok' };
+    },
+  });
+  await assert.rejects(h.service.execute({ action: 'decrypt', database: databaseAlias(self, 'message/message_0.db'), output: 'copy.sqlite' }), { code: 'E_DB_ACCOUNT_CHANGED' });
+  assert.equal(published, false);
+  assert.ok(key.equals(Buffer.alloc(32)));
+  assert.ok(salt.equals(Buffer.alloc(16)));
 });

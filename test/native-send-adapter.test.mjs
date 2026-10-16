@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { NativeSendAdapter, requireContactSnapshot } from '../src/native-send-adapter.mjs';
 import { recipientAlias } from '../src/recipient-registry.mjs';
+import { NATIVE_READ_SCRIPT } from '../src/native-read-adapter.mjs';
 
 const generation = '85bb4adf-6aee-40a9-b3df-12059c29b7b5';
 const chatId = 'wxid_authorized_fixture';
@@ -20,7 +21,7 @@ function fixture(changes = {}) {
   const descriptor = { host: '127.0.0.1', port: 5001, token: 'b'.repeat(64), pid: 1234, generation, version: '4.1.15.13', dllSha256: 'a'.repeat(64), ...changes.descriptor };
   const host = { pid: 1234, generation, status: 'ready', attached: true, verified: true, version: '4.1.15.13', dllSha256: 'a'.repeat(64), ...changes.host };
   const runtime = { pid: 1234, generation, self, accountVerified: true, dllSha256: target.dllSha256, ready: true, sendValidated: true, chatId, sessionId, displayName: '合成联系人', version: '4.1.15.13', prologuesVerified: true, ...changes.runtime };
-  const readRuntime = { ...runtime, ready: true, self: 'fixture_self', accountVerified: true, readScopeVerified: true, automaticMessagesSent: 0, dllSha256: 'a'.repeat(64), historyAvailable: false, ...changes.readRuntime };
+  const readRuntime = { ...runtime, bindingRevision: 1, ready: true, self: 'fixture_self', accountVerified: true, readScopeVerified: true, automaticMessagesSent: 0, dllSha256: 'a'.repeat(64), historyAvailable: false, ...changes.readRuntime };
   const adapter = new NativeSendAdapter({
     tokenFile: 'host.json', bindingFile: 'binding.json', targetFile: 'target.json',
     registry: changes.registry,
@@ -30,8 +31,8 @@ function fixture(changes = {}) {
       calls.push(request);
       if (changes.call) return changes.call(request, { calls, host, runtime, readRuntime });
       if (request.method === 'status') return { success: true, result: host };
-      if (request.args.method === 'inspect') return { success: true, result: request.args.name === 'readnative_live3' ? readRuntime : runtime };
-      if (request.args.name === 'readnative_live3' && request.args.method === 'contacts') return { success: true, result: { ...contactSnapshot(), self: readRuntime.self, automaticMessagesSent: 0 } };
+      if (request.args.method === 'inspect') return { success: true, result: request.args.name === NATIVE_READ_SCRIPT ? readRuntime : runtime };
+      if (request.args.name === NATIVE_READ_SCRIPT && request.args.method === 'contacts') return { success: true, result: { ...contactSnapshot(), self: readRuntime.self, automaticMessagesSent: 0 } };
       return { success: true, result: { requestId: request.args.params[0].requestId, status: 'accepted', chatId, sessionId, native: true, ...changes.sendResult } };
     },
   });
@@ -194,7 +195,7 @@ test('journal failure prevents native entry, and unknown outcomes are retained w
 });
 
 function contactSnapshot(contacts = [{ username: chatId, displayName: '合成联系人' }]) {
-  return { pid: 1234, generation, scope: 'loaded-contact-cache', complete: false, cacheSnapshotComplete: true, count: contacts.length, contacts };
+  return { pid: 1234, generation, bindingRevision: 1, scope: 'loaded-contact-cache', complete: false, cacheSnapshotComplete: true, count: contacts.length, contacts };
 }
 function snapshotFixture(snapshot, changes = {}) {
   const registered = [];
@@ -204,7 +205,7 @@ function snapshotFixture(snapshot, changes = {}) {
     ...changes,
     call: async (request, state) => {
       if (request.method === 'status') return { success: true, result: state.host };
-      if (request.args.method === 'inspect') return { success: true, result: request.args.name === 'readnative_live3' ? state.readRuntime : state.runtime };
+      if (request.args.method === 'inspect') return { success: true, result: request.args.name === NATIVE_READ_SCRIPT ? state.readRuntime : state.runtime };
       assert.equal(request.args.method, 'contacts');
       return { success: true, result: { ...snapshot, self: state.readRuntime.self, automaticMessagesSent: 0 } };
     },
@@ -212,7 +213,7 @@ function snapshotFixture(snapshot, changes = {}) {
   return { ...fx, registered };
 }
 test('native contact snapshot validation requires exact runtime identity, bounds and complete rows', () => {
-  const runtime = { pid: 1234, generation };
+  const runtime = { pid: 1234, generation, bindingRevision: 1 };
   assert.deepEqual([...requireContactSnapshot(contactSnapshot(), runtime)], [chatId]);
   assert.deepEqual([...requireContactSnapshot(contactSnapshot([]), runtime)], []);
   const valid = contactSnapshot();
@@ -254,7 +255,7 @@ test('a blocked send binding does not disable independently verified read contac
   const fx = snapshotFixture(contactSnapshot(), { binding: { runtimeBlocked: true } });
   const result = await fx.adapter.ids();
   assert.equal(result.users.every(row => row.canSend === false), true);
-  assert.equal(fx.calls.filter(call => call.args?.method === 'contacts' && call.args.name === 'readnative_live3').length, 1);
+  assert.equal(fx.calls.filter(call => call.args?.method === 'contacts' && call.args.name === NATIVE_READ_SCRIPT).length, 1);
   assert.equal(fx.registered.length, 1);
   assert.equal(fx.records.size, 0);
   await assert.rejects(fx.adapter.send({ to: chatId, text: 'mock-only', requestId: 'blocked-no-entry' }), { code: 'E_NATIVE_SEND_NOT_READY' });

@@ -31,6 +31,7 @@ function fixture(changes = {}) {
   const account = { pid: 1234, generation, source: 'reverse-native', scope: 'current-account', self, displayName: 'Fixture Account 👩‍💻', accountVerified: true, automaticMessagesSent: 0, ...changes.account };
   const contacts = { pid: 1234, generation, self, scope: 'loaded-contact-cache', complete: false, cacheSnapshotComplete: true, contacts: [{ username: chatId, displayName: 'Fixture Contact' }], count: 1, automaticMessagesSent: 0, ...changes.contacts };
   const history = { pid: 1234, generation, self, chatId, source: 'reverse-native', schemaValidated: true, automaticMessagesSent: 0, messages: [{ serverId: '18446744073709551615', type: '1', createTime: '1790908800', content: 'mock-only', senderUsername: chatId }], ...changes.history };
+  for (const row of [runtime, account, contacts, history]) if (!Object.hasOwn(row, 'bindingRevision')) row.bindingRevision = 1;
   const adapter = new NativeReadAdapter({ tokenFile: 'read-host.json', registry,
     readJsonImpl: async path => { descriptorReads.push(path); return descriptor; },
     callImpl: async request => {
@@ -88,7 +89,7 @@ test('descriptor, host and agent mismatches cannot reach data RPCs', async () =>
     { runtime: { pid: 5678 } }, { runtime: { generation: nextGeneration } }, { runtime: { version: '4.1.10.27' } }, { runtime: { dllSha256: 'c'.repeat(64) } },
     { runtime: { ready: false } }, { runtime: { accountVerified: 1 } }, { runtime: { readScopeVerified: 'true' } },
     { runtime: { automaticMessagesSent: '0' } }, { runtime: { self: '10001@chatroom' } }, { runtime: { self: 123 } },
-    { runtime: { pendingTasks: 1 } }, { runtime: { pendingCallbacks: 1 } },
+    { runtime: { pendingTasks: 1 } }, { runtime: { pendingCallbacks: 1 } }, { runtime: { bindingRevision: undefined } }, { runtime: { bindingRevision: 0 } },
   ]) {
     const fx = fixture(changes);
     await assert.rejects(fx.adapter.account());
@@ -208,6 +209,26 @@ test('contact cache is scoped to the verified runtime and is invalidated on gene
   await assert.rejects(fx.adapter.history({ to: recipientAlias(chatId) }), { code: 'E_CHAT_SCOPE' });
   assert.equal(rpcMethods(fx.calls).filter(method => method === 'contacts').length, 2);
   assert.equal(rpcMethods(fx.calls).filter(method => method === 'history').length, 2);
+});
+
+test('a rebind with the same self invalidates cached contacts and rejects old revision envelopes', async () => {
+  const fx = fixture();
+  await fx.adapter.history({ to: chatId });
+  fx.runtime.bindingRevision = 2;
+  await assert.rejects(fx.adapter.history({ to: chatId }), { code: 'E_CONTACT_SNAPSHOT' });
+  fx.contacts.bindingRevision = 2;
+  await assert.rejects(fx.adapter.history({ to: chatId }), { code: 'E_NATIVE_HISTORY_SCHEMA' });
+  fx.account.bindingRevision = 1;
+  await assert.rejects(fx.adapter.account(), { code: 'E_NATIVE_ACCOUNT_UNVERIFIED' });
+  assert.equal(rpcMethods(fx.calls).filter(method => method === 'contacts').length, 3);
+});
+
+test('old host account-change errors become actionable and never cause an implicit retry', async () => {
+  for (const code of ['E_ACCOUNT_CHANGED', 'E_OPERATION']) {
+    const fx = fixture({ call: async () => ({ success: false, error: { code, message: 'E_ACCOUNT_CHANGED' } }) });
+    await assert.rejects(fx.adapter.account(), error => error.code === 'E_ACCOUNT_CHANGED' && error.message.includes('.\\wxcc.cmd start'));
+    assert.equal(fx.calls.length, 1);
+  }
 });
 
 test('host failure is returned once with no automatic load, attach or retry', async () => {

@@ -41,6 +41,7 @@ async function fixture() {
         exports: {
           async inspect() { calls.push({ method: 'inspect' }); return { pid: 1234, architecture: 'x64', mainModule: { path: dllPath, base: '0x10000000', size: 1000 } }; },
           async echo(value) { calls.push({ method: 'echo', value }); return value; },
+          async changedAccount() { throw new Error('E_ACCOUNT_CHANGED'); },
           async hang(cancellable) { calls.push({ method: 'hang' }); return new Promise((_, reject) => { cancellable.onCancel = () => reject(new Error('cancelled')); }); },
         },
       };
@@ -115,6 +116,20 @@ test('named scripts and explicit RPC use the existing session', async () => {
     assert.equal(fx.calls.filter(x => x.method === 'attach').length, 1);
     const unload = await callPersistentHost({ tokenFile: host.tokenFile, method: 'unload', args: { name: 'probe', explicit: true } });
     assert.equal(unload.success, true);
+  } finally { await fx.cleanup(host); }
+});
+
+test('native identity failures preserve their actionable error code', async () => {
+  const fx = await fixture();
+  let host;
+  try {
+    host = await fx.start();
+    await callPersistentHost({ tokenFile: host.tokenFile, method: 'load', args: { name: 'probe', path: 'agents/probe.js' } });
+    const result = await callPersistentHost({ tokenFile: host.tokenFile, method: 'rpc', args: { name: 'probe', method: 'changedAccount', params: [] } });
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, 'E_ACCOUNT_CHANGED');
+    assert.equal(fx.calls.filter(call => call.method === 'attach').length, 1);
+    assert.equal(fx.calls.some(call => call.method === 'unload'), false);
   } finally { await fx.cleanup(host); }
 });
 test('script hashes describe the loaded source even when the file is later changed', async () => {

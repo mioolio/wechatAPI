@@ -26,7 +26,7 @@ npm.cmd ci
 .\wxcc.cmd start --pid 12345 --install-path "D:\Apps\Weixin" --timeout 60000 --json
 ```
 
-PID 为示例值。`start` 启动隐藏的常驻读取宿主，或复用相同进程、版本和源码的就绪宿主；它不会启动、结束或重启微信。初始化加载 `readnative_live3`，核验当前账号，并用本人会话的单条历史验证读取能力。这些步骤不发送消息。
+PID 为示例值。`start` 启动隐藏的常驻读取宿主，或复用相同进程、版本和源码的就绪宿主。初始化加载 `readnative_live4`，核验当前账号，并用本人会话的单条历史验证读取能力。整个过程不发送消息，也不重启微信。
 
 默认读取描述文件为 `data/native-read-host.json`，启动日志为 `data/native-read-host.log`；描述含本机访问 Token，不得共享。默认启动期限为 60000 毫秒，允许 `--timeout` 1000 至 180000。启动锁避免多个 CLI 同时连接。仅明确证明宿主进程已不存在且端口拒绝连接时，旧描述才可归档；忙碌、未知状态、其他进程或源码不一致均不覆盖。
 
@@ -44,6 +44,20 @@ node .\src\native-read-bootstrap.mjs
 
 普通读取命令复用已经准备好的宿主，不自行加载或卸载脚本，不自动重试未知结果。
 
+## 切换账号后怎样继续
+
+微信切换登录账号后，再运行一次 `start`，然后核对账号、重新获取数据库编号：
+
+```powershell
+.\wxcc.cmd start
+.\wxcc.cmd account --json
+.\wxcc.cmd db list --json
+```
+
+如果看到 `E_ACCOUNT_CHANGED`，说明读取连接还记着之前的账号。旧版后台可能显示为 `E_OPERATION: E_ACCOUNT_CHANGED`，处理方法相同。`start` 会在读取任务空闲时重新绑定当前账号，清空旧的联系人缓存和历史验证，再验证新账号。恢复后用 `ids` 或 `db list` 获取当前账号的编号。
+
+升级前已经加载的已知 `readnative_live3` 会保留；程序核对其源码与空闲状态后，加载新的 `readnative_live4`。这个恢复过程不卸载驻留脚本，不结束微信。若仍提示忙碌、未知任务或源码不匹配，请按下方[恢复说明](#脱敏驻留与恢复)检查。
+
 ## 当前账号和稳定编号
 
 ```powershell
@@ -53,7 +67,7 @@ node .\src\native-read-bootstrap.mjs
 
 `account` 返回当前本人名称、`self`、稳定 `alias` 与验证信息。名称完整显示，`self` 默认部分隐藏。`accounts` 返回目前运行代次验证过的当前账号，`scope:"current-account"`、`complete:false`；这不是全盘账号列表。
 
-本人身份来自当前客户端业务上下文，未在源码中绑定某个使用者。PID、宿主 `generation`、本人账号或 DLL 变化后，读取缓存失效并要求重新验证。换机器或换账号后重新运行 `start`、`account`、`ids`，无需搬运旧 Token 或旧映射。
+本人身份来自当前客户端业务上下文，未在源码中绑定某个使用者。PID、宿主 `generation`、账号绑定修订号 `bindingRevision`、本人账号或 DLL 变化后，读取缓存失效并要求重新验证。换机器或换账号后重新运行 `start`、`account`、`ids`，无需搬运旧 Token 或旧映射。
 
 `u_` 编号为真实 ID 的 SHA-256 前 16 位十六进制，不随联系人排序、增加或改名变化；碰撞拒绝覆盖。映射保存在本机 `data/recipients.json`。同一真实 ID 在另一机器可计算同一编号，但那台机器仍须获取自己的有效联系人快照，不能只凭公开编号猜测真实目标。
 
@@ -81,7 +95,7 @@ node .\src\native-read-bootstrap.mjs
 
 `--limit` 为 1 至 200，默认 30。当前返回最近的有限条历史，没有游标分页、全量导出、原生会话列表或原生新消息监听。单次读取不自动持久化正文。空 `messages` 表示本次业务查询没有返回记录，不应推断数据库所有时间范围均无消息。
 
-结果检查账号、目标、PID、`generation` 和消息 DTO。`historyAvailable:true` 与 `schemaValidated:true` 表明当前调用路径和结果结构通过校验，`automaticMessagesSent:0` 表明该操作未发送消息。
+结果检查账号、目标、PID、`generation`、`bindingRevision` 和消息 DTO。`historyAvailable:true` 与 `schemaValidated:true` 表明当前调用路径和结果结构通过校验，`automaticMessagesSent:0` 表明该操作未发送消息。
 
 ## 消息字段
 

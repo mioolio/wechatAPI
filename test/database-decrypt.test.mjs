@@ -18,7 +18,10 @@ async function fixture(t, profile = profile4, withSchema = false) {
   const plaintext = path.join(directory, 'fixture.sqlite');
   const database = new DatabaseSync(plaintext);
   database.exec(`PRAGMA page_size=${profile.pageSize}; PRAGMA user_version=1;`);
-  if (withSchema) database.exec("CREATE TABLE synthetic(value TEXT); INSERT INTO synthetic VALUES('fixture only');");
+  if (typeof withSchema === 'string') {
+    database.enableDefensive(false); // Only synthetic schemas may use writable_schema.
+    database.exec(withSchema);
+  } else if (withSchema) database.exec("CREATE TABLE synthetic(value TEXT); INSERT INTO synthetic VALUES('fixture only');");
   database.close();
   const bytes = await fs.readFile(plaintext);
   await fs.unlink(plaintext);
@@ -27,7 +30,7 @@ async function fixture(t, profile = profile4, withSchema = false) {
   bytes[20] = profile.reserveSize;
   for (let offset = 0; offset < bytes.length; offset += profile.pageSize) {
     const page = bytes.subarray(offset, offset + profile.pageSize), base = offset === 0 ? 100 : 0;
-    assert.equal(page[base], 13); assert.equal(page.readUInt16BE(base + 1), 0);
+    assert.ok(page[base] === 13 || page[base] === 10); assert.equal(page.readUInt16BE(base + 1), 0);
     const top = page.readUInt16BE(base + 5), count = page.readUInt16BE(base + 3);
     page.copy(page, top - profile.reserveSize, top);
     page.fill(0, profile.pageSize - profile.reserveSize);
@@ -178,6 +181,39 @@ test('authenticated malformed SQLite schema fails quick_check before publication
   await writeInput(f, encrypted(f.bytes));
   await assert.rejects(decryptDatabase({ databasePath: f.input, output: f.output, key: testKey }), codeIs('E_DB_INTEGRITY'));
   await assert.rejects(fs.stat(f.output), error => error.code === 'ENOENT');
+});
+
+test('missing WeChat FTS tokenizer is diagnosed without publishing authenticated plaintext', async t => {
+  const f = await fixture(t, profile4, `
+    CREATE VIRTUAL TABLE synthetic_fts USING fts5(content, tokenize='porter        ');
+    INSERT INTO synthetic_fts(content) VALUES('fixture only');
+    PRAGMA writable_schema=ON;
+    UPDATE sqlite_schema SET sql=replace(sql, 'porter        ', 'MMFtsTokenizer') WHERE name='synthetic_fts';
+    PRAGMA writable_schema=OFF;
+  `);
+  const ciphertext = Buffer.concat(Array.from({ length: f.bytes.length / profile4.pageSize }, (_, index) =>
+    encrypted(f.bytes.subarray(index * profile4.pageSize, (index + 1) * profile4.pageSize), index + 1)));
+  await writeInput(f, ciphertext);
+  await assert.rejects(decryptDatabase({ databasePath: f.input, output: f.output, key: testKey }), codeIs('E_DB_SQLITE_TOKENIZER'));
+  await assert.rejects(fs.stat(f.output), error => error.code === 'ENOENT');
+  assert.deepEqual(await fs.readdir(path.dirname(f.output)), []);
+  assert.deepEqual(await fs.readFile(f.input), ciphertext);
+});
+
+test('other missing FTS tokenizers retain the integrity failure and publish nothing', async t => {
+  const f = await fixture(t, profile4, `
+    CREATE VIRTUAL TABLE synthetic_fts USING fts5(content, tokenize='porter        ');
+    INSERT INTO synthetic_fts(content) VALUES('fixture only');
+    PRAGMA writable_schema=ON;
+    UPDATE sqlite_schema SET sql=replace(sql, 'porter        ', 'NotATokenizerX') WHERE name='synthetic_fts';
+    PRAGMA writable_schema=OFF;
+  `);
+  const ciphertext = Buffer.concat(Array.from({ length: f.bytes.length / profile4.pageSize }, (_, index) =>
+    encrypted(f.bytes.subarray(index * profile4.pageSize, (index + 1) * profile4.pageSize), index + 1)));
+  await writeInput(f, ciphertext);
+  await assert.rejects(decryptDatabase({ databasePath: f.input, output: f.output, key: testKey }), codeIs('E_DB_INTEGRITY'));
+  await assert.rejects(fs.stat(f.output), error => error.code === 'ENOENT');
+  assert.deepEqual(await fs.readdir(path.dirname(f.output)), []);
 });
 
 test('WAL validates both checksum byte orders, old generations, and torn frames', async t => {

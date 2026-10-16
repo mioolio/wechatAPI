@@ -312,3 +312,58 @@ test('history completes independent cleanup attempts and rejects a cleanup failu
   assert.equal(r.state.ownerReleases, 0);
   assert.equal(vm.runInContext('runtimeBlocked', r.context), true);
 });
+
+function bindingRealm() {
+  const context = vm.createContext({ rpc: {}, Process: { id: 4321 } });
+  vm.runInContext(source, context);
+  vm.runInContext(`
+    binding={pid:4321,generation:'10000000-0000-4000-8000-000000000001',self:'fixture_old',account:'synthetic-old'};
+    bindingRevision=1;knownContacts=new Set(['fixture_old_contact']);contactSnapshotValidated=true;historyValidated=true;
+    queue=async callback=>callback();
+    accountData=allowNewBinding=>{if(!allowNewBinding)throw Error('E_ACCOUNT_CHANGED');return {self:'fixture_new',account:'synthetic-new',displayName:'Synthetic Account',nameAvailable:true};};
+    inspect=()=>({self:binding?.self??null,bindingRevision,contactSnapshotAvailable:contactSnapshotValidated,historyAvailable:historyValidated,knownContacts:[...knownContacts],rebinding});
+  `, context);
+  const config = { pid: 4321, generation: '10000000-0000-4000-8000-000000000001', dllSha256: '10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5', expectedSelf: 'fixture_old', expectedBindingRevision: 1 };
+  return { context, config };
+}
+
+test('explicit read rebind resets old scopes, increments revision and never relaxes ordinary account checks', async () => {
+  const { context, config } = bindingRealm();
+  await assert.rejects(context.rpc.exports.account(), /E_ACCOUNT_CHANGED/);
+  const result = await context.rpc.exports.rebind(config);
+  assert.equal(result.self, 'fixture_new');
+  assert.equal(result.bindingRevision, 2);
+  assert.equal(result.contactSnapshotAvailable, false);
+  assert.equal(result.historyAvailable, false);
+  assert.equal(result.knownContacts.length, 0);
+  assert.equal(result.rebinding, false);
+  await assert.rejects(context.rpc.exports.account(), /E_ACCOUNT_CHANGED/);
+  await assert.rejects(context.rpc.exports.rebind(config), /E_READ_BINDING/);
+});
+
+test('rebind rejects active work and mismatched binding proofs before clearing any scope', async () => {
+  for (const setup of ['activeReads=1', 'tasks.set("pending",{})', 'historyCallbacks.set("pending",{})', 'runtimeBlocked=true']) {
+    const { context, config } = bindingRealm();
+    vm.runInContext(setup, context);
+    await assert.rejects(context.rpc.exports.rebind(config), /E_NATIVE_READ_BUSY|E_READ_NOT_READY/);
+    assert.equal(context.inspect().self, 'fixture_old');
+    assert.equal(context.inspect().historyAvailable, true);
+  }
+  for (const mismatch of [{ expectedSelf: 'fixture_other' }, { expectedBindingRevision: 0 }, { generation: '10000000-0000-4000-8000-000000000002' }, { pid: 9999 }]) {
+    const { context, config } = bindingRealm();
+    await assert.rejects(context.rpc.exports.rebind({ ...config, ...mismatch }), /E_READ_BINDING/);
+    assert.equal(context.inspect().self, 'fixture_old');
+  }
+});
+
+test('a failed rebind leaves the reader unbound with no usable old contact or history cache', async () => {
+  const { context, config } = bindingRealm();
+  context.accountData = () => { throw Error('E_ACCOUNT_CHANGED'); };
+  await assert.rejects(context.rpc.exports.rebind(config), /E_ACCOUNT_CHANGED/);
+  const result = context.inspect();
+  assert.equal(result.self, null);
+  assert.equal(result.contactSnapshotAvailable, false);
+  assert.equal(result.historyAvailable, false);
+  assert.equal(result.rebinding, false);
+  assert.equal(result.knownContacts.length, 0);
+});

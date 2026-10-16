@@ -673,12 +673,23 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 | `accountAlias`、`accountDisplayName` | 当前本人编号和名称 |
 | `databases[].alias` | 用于解密选择的 `d_` 编号 |
 | `databases[].kind` | `message`、`session`、`contact` 等类型 |
+| `databases[].role` | 区分主消息库、搜索索引等用途，见下表 |
 | `bytes`、`encrypted`、`walBytes` | 主库大小、是否加密及旁边 WAL 文件大小 |
 | `databaseCount`、`encryptedCount`、`totalBytes` | 数量和大小汇总 |
 | `directoryMatchVerified` | 目录名已匹配账号，不代表密钥归属已认证 |
 | `binding:"pending-page-auth"` | 仍待密钥和数据库页面认证 |
 
 结果不输出原文件名、账号绝对路径或密钥。此处 `accountVerified:false` / `cryptographicAccountVerified:false` 指数据库归属未完成认证，不是否定前面的本人账号。多个目录需明确选择，不按“最近修改”猜测。默认最多发现 512 个 `.db`，最多深入 4 层，跳过符号链接。
+
+想导出聊天正文，优先选 `role:"message-history"`。`kind:"message"` 中也可能有搜索索引，所以不要只看 `kind`。
+
+| `role` | 用途 |
+| --- | --- |
+| `message-history` | 主消息库，导出聊天正文时优先选它 |
+| `search-index` | 搜索索引；不等同于主消息库 |
+| `contact` | 联系人库 |
+| `session` | 会话列表库 |
+| `other` | 其他用途的数据库 |
 
 ### `db status` — 查看数据库发现摘要
 
@@ -741,7 +752,11 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 不提供 `--key-file` 时，只读检查当前已验证主进程的有限内存候选，并要求通过数据库页面认证。不打印或保存候选密钥，不要求重新登录或重启微信。
 
-**目前本机实测尚未找到自动密钥，返回 `E_DB_KEY_NOT_FOUND`，还没有真实数据库自动解密成功的验证记录。** 第一例不能理解成保证成功；有自己密钥文件时用第二种方式。现有解密、页面认证、WAL 和完整性检查已用合成 SQLite 库验证，不能替代真实客户端参数适配。
+已在 **Windows 微信 4.1.15.13 x64** 通过正式 CLI 自动导出会话库、主消息库和联系人库，全部页面认证与 SQLite `quick_check` 均通过。使用这一流程无需准备固定密钥文件；换账号后重新识别当前账号和数据库。
+
+部分搜索索引库依赖微信专用分词器 `MMFtsTokenizer`。页面认证通过后，若 SQLite 完整性检查失败，且只读搜索检查确认缺少该分词器，会返回 `E_DB_SQLITE_TOKENIZER`，不发布副本。这表示当前 SQLite 无法完成该库的验证；不能据此判断密钥错误或数据库损坏。导出聊天正文优先选择 `role:"message-history"`。
+
+其他未识别的 SQLite 完整性检查失败仍返回 `E_DB_INTEGRITY`，也不发布副本。
 
 自动扫描默认 15 秒、最多读取 512 MiB 候选内存。只有当前进程候选认证并成功导出，才报告 `accountCryptographicBinding:true`、`binding:"current-process-page-auth"`。账号、PID 或本次后台运行标识变化会停止。
 
@@ -1067,6 +1082,7 @@ $result.users | Select-Object alias, displayName, canSend
 | `E_NATIVE_PID_REQUIRED` | doctor 原生检查中找 `role:main` 的实际 PID |
 | `E_NATIVE_VERSION_UNSUPPORTED` / `E_NATIVE_HASH` | 核对支持版本和 DLL 指纹，不能只改 profile 放行 |
 | `E_NATIVE_READ_CONFIG` / `E_NATIVE_HOST_OFFLINE` | 先 start，检查本机状态与日志，不分享 Token |
+| `E_ACCOUNT_CHANGED`，或旧版的 `E_OPERATION: E_ACCOUNT_CHANGED` | 微信已切换账号：重新运行 `.\wxcc.cmd start`，再用 account 核对账号、ids / db list 获取当前编号；见 [账号切换恢复](native-read.md#切换账号后怎样继续) |
 | `E_NATIVE_START_BUSY` / `E_NATIVE_START_TIMEOUT` | 先查状态，可能已有准备任务，不重复启动或删未知锁 |
 | `E_NATIVE_READ_SOURCE` | 后台源码与当前程序不同，按 [读取恢复说明](native-read.md#脱敏驻留与恢复) 检查，不覆盖驻留脚本 |
 | `E_NATIVE_READ_BUSY` | 等待原生任务或回调；持续阻塞按原生文档恢复 |
@@ -1090,13 +1106,14 @@ $result.users | Select-Object alias, displayName, canSend
 | `E_RECORD_OUTPUT_PERMISSIONS` / `E_RECORD_CLEANUP` | 检查私有目录权限、临时残留，不分发该目录 |
 | `E_DB_NOT_FOUND` / `E_DB_ACCOUNT_BINDING` / `E_DB_AMBIGUOUS` | 明确当前本人 data-root / account-dir，不按相近目录猜测 |
 | `E_DB_UNKNOWN` | 重新 db list，切账号后不能复用旧编号 |
-| `E_DB_KEY_PROVIDER` / `E_DB_AUTO_KEY` / `E_DB_KEY_NOT_FOUND` | 自动密钥未取得，目前实测尚未成功；使用自己已有的私有 keyfile |
+| `E_DB_KEY_PROVIDER` / `E_DB_AUTO_KEY` / `E_DB_KEY_NOT_FOUND` | 有限扫描未取得该库的有效密钥；核对当前登录账号、支持版本和 db list 编号，有自己的私有密钥文件时可用 `--key-file` |
 | `E_DB_KEY_INVALID` / `E_DB_CIPHER_PROFILE` | 检查密钥文件、模式及支持参数 |
 | `E_DB_PAGE_AUTH` / `E_DB_WAL` | 验证未通过，重新取得一致源文件，不把失败副本当成功 |
 | `E_DB_SNAPSHOT_BUSY` / `E_DB_JOURNAL` | 等客户端正常完成事务，不强删侧文件 |
 | `E_DB_OUTPUT_EXISTS` / `E_DB_LIVE_OUTPUT` | 选择新私有路径，避开实时库 |
 | `E_DB_OUTPUT_PERMISSIONS` / `E_DB_CLEANUP` | 检查明文目录权限和残留，不分享该目录 |
-| `E_DB_INTEGRITY` | 副本未通过 SQLite 检查，不能当作成功导出 |
+| `E_DB_SQLITE_TOKENIZER` | 已确认缺少微信专用分词器 `MMFtsTokenizer`，当前 SQLite 无法完成该索引库验证，不发布副本；聊天正文优先选 `role:message-history` |
+| `E_DB_INTEGRITY` | 未通过 SQLite 完整性检查，尚不能归为已识别的分词器限制，不发布副本 |
 | `E_UNSUPPORTED` / `E_PROCESS_HOOK_DISABLED` | 当前未实现；原生联系人用 ids，监听用已配置的 WeFlow |
 
 ## 换电脑与分享程序

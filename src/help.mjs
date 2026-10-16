@@ -68,7 +68,7 @@ export const COMMAND_HELP = Object.freeze({
   send: { summary: '向当前授权且已绑定的个人会话提交一条文本。', usage: 'send (--to USER | --session STATE | --pick) --text TEXT [--request-id UNIQUE]', examples: ['wxcc send --to u_0123456789abcdef --text "命令测试" --request-id demo-001', 'wxcc send --pick --text "命令测试"'], notes: ['默认 reverse-native。必须有目标配置、已验证的发送 agent 和发送宿主。', '--pick 获取编号后等待选择，仅允许 canSend:true 的目标。', 'accepted 是内部提交，不能单独证明对方收到。超时结果 unknown 不自动重发。', '同一 request-id 不得换目标或正文；先用 send-status 检查结果。'], next: ['wxcc send-status --request-id demo-001'] },
   'send-status': { summary: '查询本机持久化的发送请求状态。', usage: 'send-status --request-id UNIQUE [--json]', examples: ['wxcc send-status --request-id demo-001 --json'], notes: ['不发送、不重试；账本中 accepted 不等于对方送达。'] },
   db: { summary: '发现当前账号数据库，并认证解密数据库及已提交 WAL 为独立副本。', usage: 'db list | db status | db decrypt --database DB --output FILE [--key-file FILE]', examples: ['wxcc db list --json', 'wxcc db decrypt --database d_0123456789abcdef --output "D:\\Private\\copy.sqlite"', 'wxcc db decrypt --input "D:\\Private\\encrypted.db" --key-file "D:\\Private\\key.txt" --output "D:\\Private\\copy.sqlite"'], notes: ['list/status 自动获取当前本人账号，再发现目录；可用 --data-root / --account-dir 明确指定。', 'd_ 编号来自当前本人 ID 与数据库相对路径的 SHA-256；不输出账户目录、salt 或密钥。', 'decrypt 默认只读扫描当前已验证微信进程的有限内存候选，并用数据库首页面认证密钥。', '自动找不到密钥时使用 --key-file；不会借助授权过期的组件、重新登录或重启微信。', '输出必须显式指定且不能已存在。验证页 HMAC、WAL checksum/commit、SQLite quick_check。', '独立明文副本包含完整敏感内容，请存放在私有目录。单库快照，不保证跨库原子一致。', '离线 --input 必须搭配 --key-file，不访问原生宿主。'], next: ['wxcc help db decrypt'] },
-  'db list': { summary: '列出当前账号数据库的稳定编号、类型和大小。', usage: 'db list [--data-root DIR] [--account-dir DIR] [--json]', examples: ['wxcc db list --json'], notes: ['仅显示数据库元数据，不显示正文或密钥。名称匹配和解密认证分别报告。'] },
+  'db list': { summary: '列出当前账号数据库的稳定编号、类型和大小。', usage: 'db list [--data-root DIR] [--account-dir DIR] [--json]', examples: ['wxcc db list --json'], notes: ['读取主消息库时选择 role:message-history；search-index 是搜索索引。', '仅显示数据库元数据，不显示正文或密钥。名称匹配和解密认证分别报告。'] },
   'db status': { summary: '报告数据库发现状态与加密/WAL数量。', usage: 'db status [--data-root DIR] [--json]', examples: ['wxcc db status --json'] },
   'db decrypt': { summary: '把一个数据库和其已提交 WAL 认证解密为新副本。', usage: 'db decrypt (--database DB | --input FILE) --output FILE [--key-file FILE] [--key-mode raw|passphrase|auto] [--timeout MS]', examples: ['wxcc db decrypt --database d_0123456789abcdef --output "D:\\Private\\copy.sqlite"', 'wxcc db decrypt --input "D:\\Private\\encrypted.db" --key-file "D:\\Private\\key.txt" --key-mode auto --output "D:\\Private\\copy.sqlite"'], notes: ['当前支持有限 SQLCipher3/4 参数：4096 字节页，以及 SQLCipher3 的 1024 字节页。', '密钥文件支持 32 原始字节、64 位十六进制或 SQLCipher x\'64/96hex\'。密钥不接受命令行明文。', '自动模式只读内存，读取前后及发布前确认账号与运行代次。候选不足、参数不匹配均明确失败。', '自动扫描默认 15000 毫秒、512 MiB；--timeout 100–30000 只调整取密钥时限。', '活跃回滚 journal、同代次撕裂 WAL、页面认证失败、快照持续变化或 SQLite 校验失败均不发布副本。'] },
   list: { summary: '通过选定读取后端列出会话。', usage: 'list [--keyword NAME] [--backend weflow-http|weflow-native|cache]', examples: ['wxcc list --backend weflow-http'], notes: ['reverse-native 尚未实现会话列表；原生联系人用 ids。'] },
@@ -121,11 +121,13 @@ export function renderHelp(topic) {
   ].join('\n');
 }
 export function errorHint(code) {
+  if (code === 'E_ACCOUNT_CHANGED') return '微信已切换账号。运行 .\\wxcc.cmd start 重新验证，再用 account 核对账号、ids / db list 获取当前编号。';
   if (/^E_HISTORY_COPY_/.test(code)) return '运行 wxcc help record；用 record list / show 核对副本、记录编号与当前 revision，离线输入须含精确 ID 和唯一聊天。';
   if (/^E_RECORD_/.test(code)) return '运行 wxcc help record edit；记录 ID 重复时使用 recordId，版本冲突先 record show，导出选择新的私有路径。';
   if (/^E_(?:NATIVE_READ_CONFIG|NATIVE_HOST_OFFLINE|START_)/.test(code)) return '先运行 wxcc start；用 wxcc doctor --backend reverse-native 检查版本、主进程和宿主。';
   if (/^E_(?:RECIPIENT_UNKNOWN|RECIPIENT_NOT_LOADED)/.test(code)) return '运行 wxcc ids --keyword "联系人名称"，使用本次返回的 u_ 编号。';
   if (/^E_DB_(?:KEY|CIPHER|AUTO)/.test(code)) return '运行 wxcc help db decrypt；自动密钥失败时使用私有 --key-file，切勿把密钥贴到日志或命令行。';
+  if (code === 'E_DB_SQLITE_TOKENIZER') return '该搜索索引依赖微信专用分词器；db list 中选择 role:message-history 读取主消息库，不改动或删除原索引。';
   if (/^E_DB_(?:NOT_FOUND|ACCOUNT_BINDING|AMBIGUOUS)/.test(code)) return '运行 wxcc db list --data-root "数据库根目录"；必要时加 --account-dir，目录必须对应当前账号。';
   if (/^E_NATIVE_TARGET/.test(code)) return '先 wxcc ids 获取准确编号，再 wxcc configure-target --to <编号>；配置本身不发送。';
   return undefined;

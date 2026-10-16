@@ -12,6 +12,12 @@ const PREFIX={
 };
 
 const tasks=new Map();let nextTask=0;let binding=null;
+let bindingRevision=0,activeReads=0,rebinding=false;
+async function readRequest(callback){
+ if(rebinding)throw Error('E_NATIVE_READ_BUSY');
+ activeReads++;
+ try{return await callback();}finally{activeReads--;}
+}
 const VERIFIED_DLL_SHA256='10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5';
 function moduleVerified(){const m=Process.getModuleByName('Weixin.dll');if(Process.arch!=='x64'||!m.path.replaceAll('\\','/').includes('/4.1.15.13/Weixin.dll'))throw Error('E_VERSION');return m;}
 function fn(r,ret,args){const m=moduleVerified(),p=m.base.add(r);if(!Process.findRangeByAddress(p)?.protection.includes('x'))throw Error('E_CODE_REGION');const expected=PREFIX[r.toString(16)]?.split(' ').filter(Boolean).map(x=>parseInt(x,16));if(!expected?.length)throw Error('E_PROLOGUE_MISSING:'+r.toString(16));const actual=new Uint8Array(p.readByteArray(expected.length));if(!expected.every((b,i)=>b===actual[i]))throw Error('E_PROLOGUE:'+r.toString(16));const native=new NativeFunction(p,ret,args,{abi:'win64',scheduling:'cooperative'});return(...values)=>{try{return native(...values);}catch(error){runtimeBlocked=true;throw Error('E_NATIVE_CALL_UNKNOWN:'+r.toString(16));}};}
@@ -242,7 +248,7 @@ function cachedContacts() {
 }
 
 let knownContacts=new Set();
-async function contactsSnapshot() { if(!binding||runtimeBlocked) throw Error('E_READ_NOT_READY'); const result=await queue(() => {verifyAccount();return cachedContacts();}); knownContacts=new Set(result.contacts.map(row=>row.username));contactSnapshotValidated=true; return {pid:Process.id,self:binding.self,...result,automaticMessagesSent:0}; }
+async function contactsSnapshot() { if(!binding||runtimeBlocked) throw Error('E_READ_NOT_READY'); const result=await queue(() => {verifyAccount();return cachedContacts();}); knownContacts=new Set(result.contacts.map(row=>row.username));contactSnapshotValidated=true; return {pid:Process.id,self:binding.self,bindingRevision,...result,automaticMessagesSent:0}; }
 
 async function accountLayout(){if(!binding)throw Error('E_BINDING');return await queue(()=>{const task=currentTask(),account=pair();try{fn(0x47220,'pointer',['pointer'])(account);const p=account.readPointer();if(p.isNull()||p.toString()!==binding.account)throw Error('E_ACCOUNT');const m=moduleVerified(),v=p.readPointer(),f=v.add(0x38).readPointer();if(v.compare(m.base)<0||v.compare(m.base.add(m.size))>=0||f.compare(m.base)<0||f.compare(m.base.add(m.size))>=0)throw Error('E_ACCOUNT_TYPE');return {accountVtableRva:v.sub(m.base).toString(),getterSlot38Rva:f.sub(m.base).toString(),nativeSendCalled:false};}finally{release(account);release(task);}});}
 
@@ -275,11 +281,11 @@ function selfContact(owner,self){
   return {displayName:nickname||remark||'（当前账号）',nameAvailable:Boolean(nickname||remark)};
  }finally{try{if(constructed)fn(0x2010,'void',['pointer'])(username);}finally{releaseMany([contact,service,registry]);}}
 }
-function accountData(){
+function accountData(allowNewBinding=false){
  const task=currentTask(),owner=pair(),after=pair();
  try{
   fn(0x47220,'pointer',['pointer'])(owner);const proof=identityFromOwner(owner);
-  if(binding&&(proof.account!==binding.account||proof.self!==binding.self))throw Error('E_ACCOUNT_CHANGED');
+  if(!allowNewBinding&&binding&&(proof.account!==binding.account||proof.self!==binding.self))throw Error('E_ACCOUNT_CHANGED');
   const profile=selfContact(owner,proof.self);
   fn(0x47220,'pointer',['pointer'])(after);const current=identityFromOwner(after);
   if(current.account!==proof.account||current.self!==proof.self)throw Error('E_ACCOUNT_CHANGED');
@@ -289,19 +295,31 @@ function accountData(){
 let historyValidated=false,runtimeBlocked=false;
 function inspect(){
  moduleVerified();for(const key of Object.keys(PREFIX))fn(parseInt(key,16),'void',[]);
- return {pid:Process.id,generation:binding?.generation??null,self:binding?.self??null,version:'4.1.15.13',dllSha256:VERIFIED_DLL_SHA256,
+ return {pid:Process.id,generation:binding?.generation??null,self:binding?.self??null,bindingRevision,activeReads,rebinding,version:'4.1.15.13',dllSha256:VERIFIED_DLL_SHA256,
   ready:binding!==null&&!runtimeBlocked,accountVerified:binding!==null,readScopeVerified:binding!==null,runtimeBlocked,
   historyAvailable:historyValidated,pendingTasks:[...tasks.values()].filter(r=>!r.completed&&!r.error&&!r.cancelled).length,pendingCallbacks:[...historyCallbacks.values()].filter(r=>!r.completed).length,
   contactSnapshotAvailable:contactSnapshotValidated,foregroundRequired:false,automaticMessagesSent:0};
 }
 async function prepare(config){
  if(binding||runtimeBlocked)throw Error('E_ALREADY_BOUND');
- if(config?.pid!==Process.id||config.dllSha256!==VERIFIED_DLL_SHA256||!/^[-a-f0-9]{36}$/i.test(config.generation??''))throw Error('E_READ_BINDING');
- const proof=await queue(()=>accountData());
- binding={pid:Process.id,generation:config.generation,...proof};
+ return establishBinding(config,false);
+}
+async function establishBinding(config,recover){
+ if(config?.pid!==Process.id||config.dllSha256!==VERIFIED_DLL_SHA256||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(config.generation??''))throw Error('E_READ_BINDING');
+ if(runtimeBlocked)throw Error('E_READ_NOT_READY');
+ if(rebinding||activeReads!==0||[...tasks.values()].some(r=>!r.completed&&!r.error&&!r.cancelled)||[...historyCallbacks.values()].some(r=>!r.completed))throw Error('E_NATIVE_READ_BUSY');
+ if(recover&&(!binding||config.generation!==binding.generation||config.expectedSelf!==binding.self||config.expectedBindingRevision!==bindingRevision))throw Error('E_READ_BINDING');
+ rebinding=true;
+ // A failed explicit recovery stays unbound. No old contact or history scope may survive it.
+ binding=null;knownContacts=new Set();contactSnapshotValidated=false;historyValidated=false;
+ try{
+  const proof=await queue(()=>accountData(true));
+  binding={pid:Process.id,generation:config.generation,...proof};bindingRevision++;
+ }finally{rebinding=false;}
  return inspect();
 }
-async function account(){if(!binding||runtimeBlocked)throw Error('E_READ_NOT_READY');const proof=await queue(()=>accountData());return {pid:Process.id,generation:binding.generation,source:'reverse-native',scope:'current-account',self:proof.self,displayName:proof.displayName,nameAvailable:proof.nameAvailable,accountVerified:true,automaticMessagesSent:0};}
+async function rebind(config){return establishBinding(config,true);}
+async function account(){if(!binding||runtimeBlocked)throw Error('E_READ_NOT_READY');const proof=await queue(()=>accountData());return {pid:Process.id,generation:binding.generation,bindingRevision,source:'reverse-native',scope:'current-account',self:proof.self,displayName:proof.displayName,nameAvailable:proof.nameAvailable,accountVerified:true,automaticMessagesSent:0};}
 
 // message::list_messages business ABI; typed input is borrowed until return.
 // Callee owns/destroys callback result, so all bounded DTO copies happen inside invoke.
@@ -336,7 +354,7 @@ function decodeHistory(value,input){
    messages.push({serverId,type,createTime,content,senderUsername,...(senderName===undefined?{}:{senderName}),...(flag(p.add(0x18))?{subType:p.add(0x10).readU64().toString()}:{})});
   }
  }
- return {pid:Process.id,generation:binding.generation,self,chatId:input.to,source:'reverse-native',messages,schemaValidated:true,automaticMessagesSent:0};
+ return {pid:Process.id,generation:binding.generation,bindingRevision,self,chatId:input.to,source:'reverse-native',messages,schemaValidated:true,automaticMessagesSent:0};
 }
 function nativeHistory(input,isCancelled){
  const id=String(++nextHistory),typed=Memory.alloc(0x60),chat=Memory.alloc(32),correlation=Memory.alloc(32),handle=Memory.alloc(8),object=Memory.alloc(24);
@@ -383,5 +401,5 @@ async function history(input){
  const pending=await queue(isCancelled=>({promise:nativeHistory(input,isCancelled)}));
  const result=await pending.promise;if(runtimeBlocked)throw Error('E_READ_NOT_READY');await queue(()=>verifyAccount());historyValidated=true;return result;
 }
-rpc.exports={inspect,prepare,account,contacts:contactsSnapshot,history};
+rpc.exports={inspect,prepare,rebind,account:()=>readRequest(account),contacts:()=>readRequest(contactsSnapshot),history:input=>readRequest(()=>history(input))};
 

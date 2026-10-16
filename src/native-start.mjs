@@ -6,7 +6,7 @@ import { createConnection } from 'node:net';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { doctor } from './doctor.mjs';
-import { NativeReadAdapter, NATIVE_READ_SCRIPT } from './native-read-adapter.mjs';
+import { NativeReadAdapter, NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS } from './native-read-adapter.mjs';
 import { bootstrapNativeRead } from './native-read-bootstrap.mjs';
 import { callPersistentHost } from './native-runtime-client.mjs';
 import { WxError } from './errors.mjs';
@@ -133,6 +133,17 @@ export async function startNativeRead(options = {}, dependencies = {}) {
     if (runtime.pid !== pid || runtime.generation !== descriptor.generation || runtime.version !== info.version || !sameHash(runtime.dllSha256, profile.dllSha256) || runtime.ready !== true || runtime.accountVerified !== true || runtime.readScopeVerified !== true || runtime.automaticMessagesSent !== 0 || (runtime.pendingTasks ?? 0) !== 0 || (runtime.pendingCallbacks ?? 0) !== 0) throw fail('E_NATIVE_HOST_NOT_READY', '读取宿主未通过独立验证或仍有未完成任务。');
     return runtime;
   }
+  async function inspectForPreparation(descriptor) {
+    const host = await hostStatus(descriptor);
+    if (host.status !== 'ready' || host.attached !== true || host.verified !== true) throw fail('E_NATIVE_HOST_NOT_READY', '已有宿主未就绪；不会覆盖或重新 attach。');
+    if (Array.isArray(host.scripts) && host.scripts.some(row => row.name === NATIVE_READ_SCRIPT)) {
+      verifyScript(host);
+      return;
+    }
+    const prior = Array.isArray(host.scripts) ? host.scripts.filter(row => LEGACY_NATIVE_READ_SCRIPTS.some(legacy => legacy.name === row.name)) : [];
+    if (prior.length !== 1 || prior[0].loaded !== true || prior[0].destroyed !== false || !sameHash(prior[0].sourceSha256, LEGACY_NATIVE_READ_SCRIPTS.find(row => row.name === prior[0].name)?.sourceSha256)) throw fail('E_NATIVE_HOST_NOT_READY', '已有宿主没有来源与状态可验证的读取脚本；不会覆盖或重新 attach。');
+    // bootstrap verifies the legacy agent is idle before loading the new name. It stays loaded.
+  }
   async function claimLock() {
     await mkdir(dirname(lockFile), { recursive: true });
     try { lock = await open(lockFile, 'wx', 0o600); }
@@ -159,14 +170,14 @@ export async function startNativeRead(options = {}, dependencies = {}) {
     if (descriptor) {
       let bootstrapEntered = false;
       try {
-        await inspectReady(descriptor);
+        await inspectForPreparation(descriptor);
         bootstrapEntered = true;
-        const prepared = await bootstrap({ workspace, tokenFile, profileFile }, { callImpl: request => {
+        const prepared = await bootstrap({ workspace, tokenFile, profileFile, rebindAccount: true }, { callImpl: request => {
           const remaining = deadline - clock();
           if (remaining <= 0) throw fail('E_NATIVE_START_TIMEOUT', '读取宿主复用准备已超过验证期限；未重复提交业务。');
           return call({ ...request, timeoutMs: Math.max(100, remaining) });
         } });
-        if (prepared?.ready !== true || prepared.historyAvailable !== true || prepared.accountVerified !== true || prepared.pid !== pid || prepared.generation !== descriptor.generation || prepared.version !== info.version || !sameHash(prepared.dllSha256, profile.dllSha256) || prepared.automaticMessagesSent !== 0) throw fail('E_NATIVE_HOST_UNVERIFIED', '复用宿主的读取能力未通过准备验证。');
+        if (prepared?.ready !== true || prepared.historyAvailable !== true || prepared.accountVerified !== true || prepared.readScopeVerified !== true || prepared.pid !== pid || prepared.generation !== descriptor.generation || prepared.version !== info.version || !sameHash(prepared.dllSha256, profile.dllSha256) || prepared.automaticMessagesSent !== 0 || (prepared.pendingTasks ?? 0) !== 0 || (prepared.pendingCallbacks ?? 0) !== 0 || (prepared.activeReads ?? 0) !== 0 || prepared.rebinding === true) throw fail('E_NATIVE_HOST_UNVERIFIED', '复用宿主的读取能力未通过准备验证。');
         return summary(true);
       } catch (error) {
         if (bootstrapEntered) throw error;

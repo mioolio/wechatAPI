@@ -248,27 +248,34 @@ Write-Host "请保留本次请求 ID：$requestId"
 ### 第一步：列出数据库，选择实际编号
 
 ```powershell
-.\wxcc.cmd db list --json
+$databaseList = .\wxcc.cmd db list --json | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw "数据库发现失败" }
-$databaseAlias = Read-Host "从 databases 中复制你要导出的完整 d_ 编号"
+$databaseList.databases | Select-Object alias, role, bytes, walBytes | Format-Table -AutoSize
+$databaseAlias = Read-Host "复制要导出的完整 d_ 编号，聊天正文优先选 message-history"
+if (@($databaseList.databases | Where-Object { $_.alias -eq $databaseAlias }).Count -ne 1) {
+    throw "请使用刚才列表中的完整数据库编号"
+}
 ```
 
-根据 `kind`、`bytes`、`walBytes` 等元数据选择。`binding:"pending-page-auth"` 只说明目录关系匹配，还没有用当前进程的密钥证明归属。
+想导出聊天正文，优先选 `role` 为 `message-history` 的主消息库。`session` 是会话列表，`contact` 是联系人；`search-index` 是搜索索引，不等同于主消息库。`binding:"pending-page-auth"` 只说明目录关系匹配，还没有用当前进程的密钥证明归属。
 
 如果找不到自己的数据，先运行 `.\wxcc.cmd help db list`，按实际位置加 `--data-root`；多个同账号目录时加 `--account-dir`。重新执行列表和选择步骤，并在后续 `db decrypt` 使用同样的路径选项，不按“最近修改”猜目录。
 
-### 第二步：尝试自动取密钥并导出
+### 第二步：自动取密钥并导出
 
-**自动取密钥已实现，但本机实测尚未找到有效密钥，不能把下面这条当作已验证必定成功的路径。** 有自己的私有密钥文件时，可以直接做下一步。
+已在 **Windows 微信 4.1.15.13 x64** 真机通过这条路径导出会话库、主消息库和联系人库。不用准备密钥文件，也不用重新登录或重启微信。
 
 ```powershell
 $databaseOutput = Read-Host "输入新的私有 SQLite 完整路径（程序和微信数据目录之外）"
 if (-not [IO.Path]::IsPathRooted($databaseOutput)) { throw "请使用完整路径" }
 if (Test-Path -LiteralPath $databaseOutput) { throw "输出已存在，请换新文件名" }
 .\wxcc.cmd db decrypt --database $databaseAlias --output $databaseOutput --json
+if ($LASTEXITCODE -ne 0) { throw "自动解密失败，先按错误信息排查" }
 ```
 
 成功看 `ok:true`、`quickCheck:"ok"` 和 `profile`。只有从当前已验证进程取得候选并完成页面认证，才会报告 `accountCryptographicBinding:true`。找不到密钥、数据库尚未加载或参数不支持时会失败，按实际错误处理。
+
+部分搜索索引库会提示 `E_DB_SQLITE_TOKENIZER`：页面认证已通过，但当前 SQLite 缺少微信专用分词器 `MMFtsTokenizer`，无法完成该库的验证，因此不会发布副本。这不说明密钥错误或库已损坏。先选择 `message-history` 主消息库导出聊天正文。其他未识别的 SQLite 检查失败仍返回 `E_DB_INTEGRITY`，同样不发布副本。
 
 ### 第三步：有自己的密钥文件时手动导出
 
@@ -464,7 +471,9 @@ wxcc> exit
 | 忘了 `$copyId` | `record list --json`，按账号、聊天和创建时间明确选择，再 `record show` 核对；不用重新导入猜哪份是原副本 |
 | 修改或撤销报版本冲突 | 重新 `record show` / `record changes`，读当前 `revision` 并核对内容后再决定，不去掉版本检查硬重试 |
 | 导出路径被拒绝 | 选程序和微信数据目录之外的新文件，已有导出不能覆盖 |
-| 自动解密找不到密钥 | 使用自己的私有 `--key-file`，或停在数据库发现；自动取钥尚未真机成功 |
+| 自动解密找不到密钥 | 核对当前账号、支持的微信版本和刚列出的数据库编号；有自己的私有密钥文件时，可使用 `--key-file` |
+| 解密报 `E_DB_SQLITE_TOKENIZER` | 已确认缺少微信专用分词器，暂时不能验证并导出该索引库；聊天正文优先选 `message-history` |
+| 解密报 `E_DB_INTEGRITY` | 其他 SQLite 完整性检查失败，不会发布副本；先保留错误信息和源文件 |
 | 发送超时或状态未知 | 保留原请求 ID 查 `send-status` 并核对客户端，不重复提交 |
 
 ### 哪些内容不能直接分享

@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, access, rm } from 'node:f
 import { tmpdir } from 'node:os';
 import { resolve, join, sep } from 'node:path';
 import { startNativeRead } from '../src/native-start.mjs';
-import { NATIVE_READ_SCRIPT } from '../src/native-read-adapter.mjs';
+import { NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS } from '../src/native-read-adapter.mjs';
 
 const generation = '10000000-0000-4000-8000-000000000001';
 const sha = 'a'.repeat(64);
@@ -109,12 +109,35 @@ test('missing client or unavailable process inspection causes no spawn or client
 test('ready host source mismatch, wrong target, unready state or read busy never replaces the descriptor', async () => {
   for (const changes of [
     { host: { scripts: [{ name: NATIVE_READ_SCRIPT, loaded: true, destroyed: false, sourceSha256: 'c'.repeat(64) }] } },
-    { host: { status: 'attached-error' } }, { host: { pid: 5678 } }, { inspectError: 'E_NATIVE_READ_BUSY' },
-    { runtime: { generation: '10000000-0000-4000-8000-000000000002' } },
+    { host: { status: 'attached-error' } }, { host: { pid: 5678 } },
   ]) {
     const fx = await fixture({ existing: true, ...changes });
     try { const original = await readFile(fx.tokenFile, 'utf8'); await assert.rejects(startNativeRead({ workspace: fx.workspace }, fx.dependencies)); assert.equal(await readFile(fx.tokenFile, 'utf8'), original); assert.equal(count(fx, 'spawn'), 0); assert.equal(count(fx, 'bootstrap'), 0); }
     finally { await fx.cleanup(); }
+  }
+});
+
+test('explicit start prepares a known idle legacy host under the new script name without another attach', async () => {
+  const legacy = LEGACY_NATIVE_READ_SCRIPTS[0];
+  const fx = await fixture({ existing: true, host: { scripts: [{ ...legacy, loaded: true, destroyed: false }] } });
+  try {
+    assert.equal((await startNativeRead({ workspace: fx.workspace }, fx.dependencies)).ready, true);
+    assert.equal(count(fx, 'spawn'), 0);
+    assert.equal(count(fx, 'inspect'), 0);
+    assert.equal(fx.calls.find(row => row[0] === 'bootstrap')[1].rebindAccount, true);
+  } finally { await fx.cleanup(); }
+});
+
+test('failed preparation preserves an existing host and never archives or spawns', async () => {
+  for (const changes of [{ runtime: { pendingTasks: 1 } }, { runtime: { generation: '10000000-0000-4000-8000-000000000002' } }, { bootstrapError: 'E_NATIVE_READ_BUSY' }]) {
+    const fx = await fixture({ existing: true, ...changes });
+    try {
+      const before = await readFile(fx.tokenFile, 'utf8');
+      await assert.rejects(startNativeRead({ workspace: fx.workspace }, fx.dependencies));
+      assert.equal(await readFile(fx.tokenFile, 'utf8'), before);
+      assert.equal(count(fx, 'spawn'), 0);
+      assert.equal(count(fx, 'bootstrap'), 1);
+    } finally { await fx.cleanup(); }
   }
 });
 

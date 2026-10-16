@@ -13,10 +13,17 @@ function verifiedAccount(value) {
   if (!value || value.accountVerified !== true || value.automaticMessagesSent !== 0 || !Number.isSafeInteger(value.pid) || value.pid < 1 || typeof value.generation !== 'string' || typeof value.self !== 'string' || !/^[A-Za-z0-9_.-]{1,128}$/.test(value.self)) throw new WxError('E_DB_ACCOUNT', '数据库命令需要当前已验证的本人账户。');
   return value;
 }
-const sameAccount = (a, b) => a.pid === b.pid && a.generation === b.generation && a.self === b.self;
+const sameAccount = (a, b) => a.pid === b.pid && a.generation === b.generation && a.self === b.self && a.bindingRevision === b.bindingRevision;
 function kind(relativePath) {
   const folder = relativePath.replaceAll('\\', '/').split('/')[0].toLowerCase();
   return ['message', 'session', 'contact', 'head_image', 'favorite', 'emoticon', 'sns', 'biz', 'chat_room'].includes(folder) ? folder : 'other';
+}
+function role(relativePath) {
+  const normalized = relativePath.replaceAll('\\', '/').toLowerCase();
+  if (/^message\/message_\d+\.db$/.test(normalized)) return 'message-history';
+  if (/(?:^|\/)[^/]*fts[^/]*\.db$/.test(normalized)) return 'search-index';
+  const folder = kind(normalized);
+  return ['contact', 'session'].includes(folder) ? folder : 'other';
 }
 
 /** DB operations never instantiate a send adapter or expose account paths/key material. */
@@ -51,7 +58,7 @@ export function createDatabaseService(options = {}, dependencies = {}) {
         const alias = databaseAlias(account.self, database.relativePath);
         if (aliases.has(alias)) throw new WxError('E_DB_ALIAS_COLLISION', '数据库编号发生碰撞，不会猜测文件。');
         aliases.set(alias, database);
-        return { alias, kind: kind(database.relativePath), ...publicInfo.databases[index] };
+        return { alias, kind: kind(database.relativePath), role: role(database.relativePath), ...publicInfo.databases[index] };
       });
       const common = { source: 'current-account-databases', accountAlias: recipientAlias(account.self), accountDisplayName: account.displayName, ...publicInfo, databases, automaticMessagesSent: 0 };
       if (action !== 'decrypt') return common;
