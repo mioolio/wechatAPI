@@ -198,6 +198,20 @@ test('zero server IDs are preserved for distinct unreported records without gues
   assert.equal(result.messages.some(row => Object.hasOwn(row, 'localId')), false);
 });
 
+test('history recognizes native image and sticker XML while retaining exact message identity', async () => {
+  const rawXml = '<msg><emoji md5="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" cdnurl="https://fixture.qpic.cn/sticker.gif" /></msg>';
+  const fx = fixture({ history: { messages: [{ serverId: '18446744073709551615', type: '47', createTime: '1790908800', content: '[表情]', rawXml, senderUsername: chatId }] } });
+  const result = await fx.adapter.history({ to: chatId });
+  assert.equal(result.messages[0].id, '18446744073709551615');
+  assert.equal(result.messages[0].rawXml, rawXml);
+  assert.equal(result.messages[0].media[0].kind, 'sticker');
+  assert.equal(result.messages[0].media[0].md5, 'a'.repeat(32));
+  for (const badXml of [123, '\ud800', 'x'.repeat(1024 * 1024 + 1)]) {
+    fx.history.messages[0].rawXml = badXml;
+    await assert.rejects(fx.adapter.history({ to: chatId }), { code: 'E_NATIVE_HISTORY_SCHEMA' });
+  }
+});
+
 test('contact cache is scoped to the verified runtime and is invalidated on generation change', async () => {
   const fx = fixture();
   await fx.adapter.history({ to: recipientAlias(chatId) });

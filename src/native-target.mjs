@@ -8,14 +8,16 @@ import { WxError } from './errors.mjs';
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
 export const DEFAULT_NATIVE_TARGET_FILE = resolve(WORKSPACE, 'data/native-target.json');
 export const isIndividualId = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_.:-]{0,255}$/.test(value) && !value.startsWith('gh_') && !/^u_[a-f0-9]{16}$/.test(value) && !new Set(['filehelper', 'weixin', 'newsapp', 'fmessage', 'medianote', 'qqmail', 'qmessage', 'tmessage', 'floatbottle', 'shakeapp', 'facebookapp', 'feedsapp', 'voiceinputapp', 'notification_messages', 'brandsessionholder']).has(value);
+/** File Transfer Assistant is the one supported service target; it can never be self. */
+export const isNativeTargetId = value => value === 'filehelper' || isIndividualId(value);
 const isName = value => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && value.isWellFormed() && !/[\0\r\n]/.test(value);
 const isGeneration = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
 const isHash = value => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 const fields = new Set(['schemaVersion', 'chatId', 'displayName', 'self', 'sourcePid', 'sourceGeneration', 'version', 'dllSha256']);
 
-/** Local explicit authorization for one individual, scoped to the account that created it. */
+/** Local explicit authorization for one supported conversation, scoped to its current account. */
 export function requireNativeTarget(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 2 || Object.keys(value).some(key => !fields.has(key)) || !isIndividualId(value.chatId) || !isIndividualId(value.self) || !isName(value.displayName) || value.chatId === value.displayName || !Number.isSafeInteger(value.sourcePid) || value.sourcePid < 1 || !isGeneration(value.sourceGeneration) || !/^\d+\.\d+\.\d+\.\d+$/.test(value.version ?? '') || !isHash(value.dllSha256)) throw new WxError('E_NATIVE_TARGET', '单目标授权配置缺失或无效；先读取当前账号及联系人，再用 configure-target --to 精确 ID 或已登记编号配置。');
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.schemaVersion !== 2 || Object.keys(value).some(key => !fields.has(key)) || !isNativeTargetId(value.chatId) || !isIndividualId(value.self) || !isName(value.displayName) || value.chatId === value.displayName || !Number.isSafeInteger(value.sourcePid) || value.sourcePid < 1 || !isGeneration(value.sourceGeneration) || !/^\d+\.\d+\.\d+\.\d+$/.test(value.version ?? '') || !isHash(value.dllSha256)) throw new WxError('E_NATIVE_TARGET', '单目标授权配置缺失或无效；先读取当前账号及联系人，再用 configure-target --to 精确 ID 或已登记编号配置。');
   return { schemaVersion: 2, chatId: value.chatId, displayName: value.displayName, self: value.self, sourcePid: value.sourcePid, sourceGeneration: value.sourceGeneration, version: value.version, dllSha256: value.dllSha256.toLowerCase() };
 }
 
@@ -49,7 +51,7 @@ export async function configureNativeTarget({ to, displayName, targetFile = DEFA
     await registry.read();
     chatId = registry.resolve(to);
   }
-  if (!isIndividualId(chatId)) throw new WxError('E_CHAT_SCOPE', '发送授权只支持精确的个人用户 ID 或已登记编号，不支持昵称、群组、公众号或服务会话。');
+  if (!isNativeTargetId(chatId)) throw new WxError('E_CHAT_SCOPE', '发送授权只支持个人联系人或文件传输助手的精确 ID 或已登记编号，不支持昵称、群组、公众号或其他服务会话。');
   const seen = new Set();
   let contact;
   for (const row of snapshot.users) {
@@ -57,7 +59,7 @@ export async function configureNativeTarget({ to, displayName, targetFile = DEFA
     seen.add(row.chatId);
     if (row.chatId === chatId) contact = row;
   }
-  if (!contact || (displayName !== undefined && displayName !== contact.displayName) || contact.isGroup === true || contact.isOfficial === true || contact.kind === 'group' || contact.kind === 'official') throw new WxError('E_CHAT_SCOPE', '目标不在当前精确联系人快照中，名称不符，或不是个人联系人；不会按昵称猜测。');
+  if (!contact || (displayName !== undefined && displayName !== contact.displayName) || contact.isGroup === true || contact.isOfficial === true || contact.kind === 'group' || contact.kind === 'official') throw new WxError('E_CHAT_SCOPE', '目标不在当前精确联系人快照中，名称不符，或不是个人联系人或文件传输助手；不会按昵称猜测。');
   const target = requireNativeTarget({ schemaVersion: 2, chatId, displayName: contact.displayName, self: account.self, sourcePid: account.pid, sourceGeneration: account.generation, version: account.version, dllSha256: account.dllSha256 });
   await saveTargetImpl(targetFile, target);
   return { source: 'local-native-target', configured: true, chatId, displayName: target.displayName, self: target.self, alias: recipientAlias(chatId), automaticMessagesSent: 0, requiresFreshSendBinding: true };

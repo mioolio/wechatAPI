@@ -44,5 +44,16 @@
     "nativeEntryCalled": true,
     "evidence": "Previously verified native coroutine text-send ABI for this exact client DLL. This record does not authorize a target or confirm a new delivery."
   },
+  "nativeImageSendValidation": {
+    "version": "4.1.15.13",
+    "dllSha256": "10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5",
+    "entryRva": "0x2ba7a20",
+    "status": "accepted",
+    "verifiedAt": "2026-10-18",
+    "requestId": "binary-image-abi-validation",
+    "requestIdRedacted": true,
+    "nativeEntryCalled": true,
+    "evidence": "Verified native image send via exact current-account HttpResource cache, then independently read back a new type-3 File Transfer Assistant record whose XML MD5 matches the source PNG. This record validates this binary ABI, not a future target or delivery."
+  },
   "evidence": "Static AddMsg type-name, vtable and protobuf field-switch relocation; pending real new-message validation."
 }

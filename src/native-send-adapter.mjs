@@ -2,16 +2,18 @@ import { readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { callPersistentHost } from './native-runtime-client.mjs';
 import { WxError } from './errors.mjs';
 import { RecipientRegistry, recipientAlias } from './recipient-registry.mjs';
 import { SendJournal } from './send-journal.mjs';
 import { NativeReadAdapter } from './native-read-adapter.mjs';
+import { stageSendImage, cacheSendImage } from './send-image.mjs';
 import { DEFAULT_NATIVE_TARGET_FILE, requireNativeTarget, configureNativeTarget, isIndividualId } from './native-target.mjs';
 export { requireContactSnapshot } from './native-read-adapter.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
-export const NATIVE_SEND_SCRIPT = 'sendnative_live3';
+export const NATIVE_SEND_SCRIPT = 'sendnative_live5';
 const isStateId = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,512}$/.test(value);
 const isGeneration = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
 
@@ -29,13 +31,16 @@ function requestId(value) {
 
 /** Reuses an already attached host. Never attaches, loads scripts, or performs cleanup. */
 export class NativeSendAdapter {
-  constructor({ tokenFile, readTokenFile = resolve(WORKSPACE, 'data/native-read-host.json'), bindingFile = resolve(WORKSPACE, 'data/native-send-binding.json'), targetFile = DEFAULT_NATIVE_TARGET_FILE, recipientsFile = resolve(WORKSPACE, 'data/recipients.json'), registry, journal, readAdapter, configureImpl = configureNativeTarget, callImpl = callPersistentHost, readJsonImpl } = {}) {
+  constructor({ tokenFile, readTokenFile = resolve(WORKSPACE, 'data/native-read-host.json'), bindingFile = resolve(WORKSPACE, 'data/native-send-binding.json'), targetFile = DEFAULT_NATIVE_TARGET_FILE, recipientsFile = resolve(WORKSPACE, 'data/recipients.json'), registry, journal, readAdapter, configureImpl = configureNativeTarget, callImpl = callPersistentHost, readJsonImpl, stageImageImpl = stageSendImage, cacheImageImpl = cacheSendImage, waitImpl = delay } = {}) {
     this.tokenFile = tokenFile ?? resolve(WORKSPACE, 'data/research-host.json');
     this.bindingFile = bindingFile;
     this.targetFile = targetFile;
     this.configureImpl = configureImpl;
     this.callImpl = callImpl;
     this.readJsonImpl = readJsonImpl ?? readJsonFile;
+    this.stageImageImpl = stageImageImpl;
+    this.cacheImageImpl = cacheImageImpl;
+    this.waitImpl = waitImpl;
     this.registry = registry ?? new RecipientRegistry({ filePath: recipientsFile });
     this.journal = journal ?? new SendJournal();
     this.readAdapter = readAdapter ?? new NativeReadAdapter({ tokenFile: tokenFile ?? readTokenFile, recipientsFile, registry: this.registry, callImpl, ...(readJsonImpl ? { readJsonImpl } : {}) });
@@ -90,6 +95,9 @@ export class NativeSendAdapter {
       ready: read.ready === true || send.ready === true, attached: read.attached === true || send.attached === true,
       accountVerified: read.accountVerified === true, readScopeVerified: read.readScopeVerified === true,
       historyAvailable: read.historyAvailable === true, sendAvailable: send.ready === true,
+      imageSendAvailable: send.ready === true && send.imageSendValidated === true && send.imageProloguesVerified === true,
+      imageSendValidated: send.imageSendValidated === true,
+      imageValidationAvailable: send.ready === true && send.imageValidationAllowed === true && send.chatId === 'filehelper' && send.imageProloguesVerified === true,
       scopeVerified: send.scopeVerified === true,
       sendValidated: send.ready === true && send.sendValidated === true,
       prologuesVerified: send.prologuesVerified === true,
@@ -128,7 +136,11 @@ export class NativeSendAdapter {
     }) };
   }
 
-  async send({ to, session, text, requestId: suppliedId } = {}) {
+  async send({ to, session, text, image, requestId: suppliedId } = {}) {
+    if (image !== undefined) {
+      if (text !== undefined) throw new WxError('E_SEND_CONTENT', '发送必须且只能提供文字或图片之一。');
+      return this.sendImage({ to, session, image, requestId: suppliedId });
+    }
     if ((to === undefined) === (session === undefined)) throw new WxError('E_CHAT_TARGET', '发送必须且只能指定 --to 或 --session 之一。');
     let target = to ?? session;
     if (!isStateId(target)) throw new WxError('E_CHAT_SCOPE', '发送仅接受已授权的明确会话 ID；昵称不能用作 ID。');
@@ -159,6 +171,50 @@ export class NativeSendAdapter {
     if (result.status === 'failed') throw new WxError('E_NATIVE_SEND_FAILED', '客户端内部发送报告失败，不会重试。', { requestId: id });
     if (result.status === 'unknown') throw new WxError('E_NATIVE_OUTCOME_UNKNOWN', '客户端内部发送结果未知，不会重试。', { requestId: id });
     return { ...result, alias: recipientAlias(context.binding.chatId), displayName: context.binding.displayName, source: 'reverse-native', deliveryConfirmed: false };
+  }
+
+  async sendImage({ to, session, image, requestId: suppliedId } = {}) {
+    if ((to === undefined) === (session === undefined)) throw new WxError('E_CHAT_TARGET', '发送必须且只能指定 --to 或 --session 之一。');
+    let target = to ?? session;
+    if (!isStateId(target)) throw new WxError('E_CHAT_SCOPE', '发送图片仅接受已授权的明确会话 ID。');
+    const id = requestId(suppliedId);
+    const context = await this.context();
+    if (/^u_[a-f0-9]{16}$/.test(target)) {
+      await this.registry.read();
+      const resolved = this.registry.resolve(target);
+      if (!resolved) throw new WxError('E_RECIPIENT_ALIAS', '编号尚未登记；先运行 ids 获取当前用户编号。');
+      target = to === undefined && resolved === context.binding.chatId ? context.binding.sessionId : resolved;
+    }
+    if (target !== (to === undefined ? context.binding.sessionId : context.binding.chatId)) throw new WxError('E_CHAT_SCOPE', '目标不属于本机明确授权的单个联系人绑定；拒绝发送图片。');
+    const runtime = await this.inspectContext(context);
+    const canValidate = runtime.imageValidationAllowed === true && context.binding.chatId === 'filehelper';
+    if (!runtime.ready || runtime.imageProloguesVerified !== true || (runtime.imageSendValidated !== true && !canValidate)) throw new WxError('E_NATIVE_IMAGE_NOT_READY', '原生图片发送尚未通过此二进制的入口与运行验证；首次验证仅允许已绑定的文件传输助手。');
+    const staged = await this.stageImageImpl(image);
+    if (!staged || typeof staged.path !== 'string' || !/^[a-f0-9]{64}$/.test(staged.sha256 ?? '') || !Number.isSafeInteger(staged.bytes) || staged.bytes < 1) throw new WxError('E_IMAGE_STAGE', '图片暂存结果无效；没有进入原生发送。');
+    const imageResource = `wxcc-image-${randomUUID()}`;
+    const resource = await this.call('rpc', { name: NATIVE_SEND_SCRIPT, method: 'prepareImage', params: [{ to: context.binding.chatId, imageResource, imageSha256: staged.sha256 }] });
+    if (!resource || resource.pid !== context.binding.pid || resource.generation !== context.binding.generation || resource.self !== context.binding.self || resource.chatId !== context.binding.chatId || resource.imageResource !== imageResource || resource.imageSha256 !== staged.sha256 || resource.automaticMessagesSent !== 0) throw new WxError('E_IMAGE_CACHE_SCOPE', '原生图片缓存来源与当前账户、目标或资源标识不一致；没有发送。');
+    await this.cacheImageImpl(staged, resource.cachePath);
+    let imageRuntime;
+    // The queue's final native owner is released shortly after a read-only result.
+    for (let attempt = 0; attempt < 25; attempt++) {
+      imageRuntime = await this.inspectContext(context);
+      if (!imageRuntime.nativeWorkPending) break;
+      await this.waitImpl(200);
+    }
+    if (!imageRuntime?.ready || imageRuntime.imageProloguesVerified !== true || !(imageRuntime.imageSendValidated === true || (imageRuntime.imageValidationAllowed === true && context.binding.chatId === 'filehelper'))) throw new WxError('E_NATIVE_IMAGE_NOT_READY', '图片资源准备后原生运行态未就绪；没有发送。');
+    await this.journal.reserve({ requestId: id, alias: recipientAlias(context.binding.chatId), textHash: createHash('sha256').update(`image:${staged.sha256}`).digest('hex'), generation: context.binding.generation, pid: context.binding.pid });
+    let result;
+    try { result = await this.call('rpc', { name: NATIVE_SEND_SCRIPT, method: 'sendImage', params: [{ to: context.binding.chatId, imageResource, imageSha256: staged.sha256, requestId: id }] }, id); }
+    catch (error) { await this.journal.finish(id, { status: 'unknown' }).catch(() => {}); throw error; }
+    if (!result || result.requestId !== id || result.native !== true || result.type !== 'image' || result.chatId !== context.binding.chatId || result.sessionId !== context.binding.sessionId || !['accepted', 'failed', 'unknown'].includes(result.status)) {
+      await this.journal.finish(id, { status: 'unknown' }).catch(() => {});
+      throw new WxError('E_NATIVE_OUTCOME_UNKNOWN', '原生图片回执缺失或与绑定不一致；结果未知，不会重试。', { requestId: id });
+    }
+    try { await this.journal.finish(id, { status: result.status, receipt: result }); }
+    catch { throw new WxError('E_NATIVE_OUTCOME_UNKNOWN', '原生图片请求已提交，但回执保存失败；不会重试。', { requestId: id }); }
+    if (result.status !== 'accepted') throw new WxError(result.status === 'failed' ? 'E_NATIVE_SEND_FAILED' : 'E_NATIVE_OUTCOME_UNKNOWN', '原生图片发送未返回接受状态；不会重试。', { requestId: id, ...(result.resultMessage ? { reason: result.resultMessage } : {}) });
+    return { ...result, alias: recipientAlias(context.binding.chatId), displayName: context.binding.displayName, source: 'reverse-native', deliveryConfirmed: false, imageSha256: staged.sha256, imageBytes: staged.bytes, imageFormat: staged.format };
   }
 
   async close() { await this.readAdapter.close?.(); /* Persistent hosts remain attached and loaded. */ }

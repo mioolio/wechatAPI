@@ -348,10 +348,11 @@ function decodeHistory(value,input){
    const content=flag(p.add(0x48))?text(p.add(0x28),262144,'content'):'',senderUsername=text(p.add(0x50),256,'sender');
    if(senderUsername&&!/^[A-Za-z0-9_.:@-]{1,256}$/.test(senderUsername))throw Error('E_HISTORY_SENDER');
    const senderName=flag(p.add(0x90))?text(p.add(0x70),16384,'sender-name'):undefined;
-   bytes+=content.length*4+(senderName?.length??0)*4;if(bytes>3*1024*1024)throw Error('E_HISTORY_BYTE_LIMIT');
-   // Raw XML is intentionally disabled at the native query boundary.
-   if(flag(p.add(0xb8)))throw Error('E_HISTORY_XML_UNEXPECTED');
-   messages.push({serverId,type,createTime,content,senderUsername,...(senderName===undefined?{}:{senderName}),...(flag(p.add(0x18))?{subType:p.add(0x10).readU64().toString()}:{})});
+   // MessageDto optional source XML is a 32-byte std::string at +0x98,
+   // with presence at +0xb8. Copy it while the native callback owns the DTO.
+   const rawXml=flag(p.add(0xb8))?text(p.add(0x98),262144,'raw-xml'):undefined;
+   bytes+=content.length*4+(senderName?.length??0)*4+(rawXml?.length??0)*4;if(bytes>3*1024*1024)throw Error('E_HISTORY_BYTE_LIMIT');
+   messages.push({serverId,type,createTime,content,senderUsername,...(senderName===undefined?{}:{senderName}),...(rawXml===undefined?{}:{rawXml}),...(flag(p.add(0x18))?{subType:p.add(0x10).readU64().toString()}:{})});
   }
  }
  return {pid:Process.id,generation:binding.generation,bindingRevision,self,chatId:input.to,source:'reverse-native',messages,schemaValidated:true,automaticMessagesSent:0};
@@ -371,7 +372,7 @@ function nativeHistory(input,isCancelled){
   ctor(chat,Memory.allocUtf8String(input.to));keep.constructed=1;
   ctor(correlation,Memory.allocUtf8String('wxcc-read-'+id));keep.constructed=2;
   typed.writePointer(chat);typed.add(8).writePointer(chat.add(32));typed.add(16).writePointer(chat.add(32));
-  typed.add(0x48).writeS32(input.limit);typed.add(0x54).writeU8(0);typed.add(0x58).writeU8(1);
+  typed.add(0x48).writeS32(input.limit);typed.add(0x54).writeU8(1);typed.add(0x58).writeU8(1);
   // Memory.alloc() regions can be cloaked from Process.findRangeByAddress.
   // This 32-byte header is our own pinned allocation; only an external heap buffer needs range checks.
   const n=chat.add(16).readU64().toNumber(),capacity=chat.add(24).readU64().toNumber();

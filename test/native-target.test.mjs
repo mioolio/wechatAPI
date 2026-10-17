@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
-import { requireNativeTarget, readNativeTarget, saveNativeTarget, configureNativeTarget } from '../src/native-target.mjs';
+import { requireNativeTarget, readNativeTarget, saveNativeTarget, configureNativeTarget, isIndividualId, isNativeTargetId } from '../src/native-target.mjs';
 import { NativeSendAdapter } from '../src/native-send-adapter.mjs';
 import { recipientAlias } from '../src/recipient-registry.mjs';
 
@@ -17,7 +17,23 @@ const target = { schemaVersion: 2, chatId, displayName: name, self, sourcePid: a
 
 test('local target has no default, excludes groups and services, and binds an explicit current account', () => {
   assert.deepEqual(requireNativeTarget(target), target);
-  for (const value of [undefined, {}, { ...target, schemaVersion: 1 }, { ...target, extra: true }, { ...target, self: undefined }, { ...target, chatId: 'room@chatroom' }, { ...target, chatId: 'gh_official' }, { ...target, chatId: 'filehelper' }, { ...target, chatId: recipientAlias(chatId) }, { ...target, displayName: ' ' }, { ...target, displayName: '\ud800' }, { ...target, displayName: 'a\nb' }, { ...target, sourceGeneration: 'stale' }, { ...target, dllSha256: 'invalid' }]) assert.throws(() => requireNativeTarget(value), { code: 'E_NATIVE_TARGET' });
+  for (const value of [undefined, {}, { ...target, schemaVersion: 1 }, { ...target, extra: true }, { ...target, self: undefined }, { ...target, chatId: 'room@chatroom' }, { ...target, chatId: 'gh_official' }, { ...target, chatId: 'weixin' }, { ...target, self: 'filehelper' }, { ...target, chatId: recipientAlias(chatId) }, { ...target, displayName: ' ' }, { ...target, displayName: '\ud800' }, { ...target, displayName: 'a\nb' }, { ...target, sourceGeneration: 'stale' }, { ...target, dllSha256: 'invalid' }]) assert.throws(() => requireNativeTarget(value), { code: 'E_NATIVE_TARGET' });
+});
+
+test('filehelper is the sole supported service target and never an account identity', async () => {
+  assert.equal(isIndividualId('filehelper'), false);
+  assert.equal(isNativeTargetId('filehelper'), true);
+  for (const unsupported of ['weixin', 'newsapp', 'notification_messages', 'brandsessionholder', 'gh_official', 'room@chatroom']) assert.equal(isNativeTargetId(unsupported), false);
+  const helper = { ...target, chatId: 'filehelper', displayName: '文件传输助手' };
+  assert.deepEqual(requireNativeTarget(helper), helper);
+  for (const to of ['filehelper', recipientAlias('filehelper')]) {
+    const fx = configureFixture({ contacts: { users: [{ chatId: 'filehelper', displayName: helper.displayName, alias: recipientAlias('filehelper') }] } });
+    fx.deps.registry.resolve = alias => alias === recipientAlias('filehelper') ? 'filehelper' : undefined;
+    assert.equal((await configureNativeTarget({ to }, fx.deps)).chatId, 'filehelper');
+    assert.deepEqual(fx.saved[0].value, helper);
+  }
+  const wrongSelf = configureFixture({ account: { self: 'filehelper' }, contacts: { self: 'filehelper' } });
+  await assert.rejects(configureNativeTarget({ to: chatId }, wrongSelf.deps), { code: 'E_NATIVE_TARGET_SCOPE' });
 });
 
 test('target storage rejects missing, oversized or malformed files and saves only validated fields', async t => {
@@ -128,6 +144,19 @@ test('native prepare rejects the wrong current account even when ID and name mat
   const fx = await mockedAgent({ lookupSelf: 'wxid_other_self' });
   await assert.rejects(fx.context.rpc.exports.prepare(agentConfig), /E_TARGET_IDENTITY/);
   assert.deepEqual(fx.nativeCalls, []);
+});
+
+test('native prepare accepts only exact filehelper as a service target and still proves its identity', async () => {
+  const fx = await mockedAgent();
+  const runtime = await fx.context.rpc.exports.prepare({ ...agentConfig, chatId: 'filehelper', sessionId: 'filehelper', displayName: '文件传输助手' });
+  assert.equal(runtime.chatId, 'filehelper');
+  assert.deepEqual(fx.lookups, [{ id: 'filehelper', displayName: '文件传输助手' }]);
+  assert.deepEqual(fx.nativeCalls, []);
+  for (const change of [{ self: 'filehelper' }, { chatId: 'weixin', sessionId: 'weixin' }, { chatId: 'notification_messages', sessionId: 'notification_messages' }]) {
+    const invalid = await mockedAgent();
+    await assert.rejects(invalid.context.rpc.exports.prepare({ ...agentConfig, ...change }), /E_BINDING_SCOPE/);
+    assert.deepEqual(invalid.lookups, []);
+  }
 });
 
 test('native send rejects an account switch on the same account pointer before entering business send', async () => {

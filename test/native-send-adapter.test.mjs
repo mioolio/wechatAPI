@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NativeSendAdapter, requireContactSnapshot } from '../src/native-send-adapter.mjs';
+import { NativeSendAdapter, NATIVE_SEND_SCRIPT, requireContactSnapshot } from '../src/native-send-adapter.mjs';
 import { recipientAlias } from '../src/recipient-registry.mjs';
 import { NATIVE_READ_SCRIPT } from '../src/native-read-adapter.mjs';
 
@@ -26,6 +26,8 @@ function fixture(changes = {}) {
     tokenFile: 'host.json', bindingFile: 'binding.json', targetFile: 'target.json',
     registry: changes.registry,
     journal,
+    stageImageImpl: changes.stageImageImpl ?? (async () => ({ path: 'C:\\synthetic\\picture.png', sha256: 'c'.repeat(64), bytes: 100, format: 'png' })),
+    cacheImageImpl: changes.cacheImageImpl ?? (async () => ({ cached: true })),
     readJsonImpl: async path => path === 'host.json' ? descriptor : path === 'target.json' ? { ...target, ...changes.target } : binding,
     callImpl: async request => {
       calls.push(request);
@@ -33,7 +35,8 @@ function fixture(changes = {}) {
       if (request.method === 'status') return { success: true, result: host };
       if (request.args.method === 'inspect') return { success: true, result: request.args.name === NATIVE_READ_SCRIPT ? readRuntime : runtime };
       if (request.args.name === NATIVE_READ_SCRIPT && request.args.method === 'contacts') return { success: true, result: { ...contactSnapshot(), self: readRuntime.self, automaticMessagesSent: 0 } };
-      return { success: true, result: { requestId: request.args.params[0].requestId, status: 'accepted', chatId, sessionId, native: true, ...changes.sendResult } };
+      if (request.args.method === 'prepareImage') return { success: true, result: { pid: binding.pid, generation, self, chatId, ...request.args.params[0], cachePath: `C:\\synthetic\\HttpResource\\${'e'.repeat(32)}`, automaticMessagesSent: 0, ...changes.prepareImageResult } };
+      return { success: true, result: { requestId: request.args.params[0].requestId, status: 'accepted', chatId, sessionId, native: true, ...(request.args.method === 'sendImage' ? { type: 'image' } : {}), ...changes.sendResult } };
     },
   });
   return { adapter, calls, binding, descriptor, host, runtime, journal, records };
@@ -47,7 +50,7 @@ test('reverse send reuses the host and accepts only the verified bound chat', as
   assert.equal(result.native, true);
   assert.equal(result.deliveryConfirmed, false);
   assert.deepEqual(fx.calls.map(call => [call.method, call.args?.method]), [['status', undefined], ['rpc', 'inspect'], ['rpc', 'sendText']]);
-  assert.deepEqual(sendCalls(fx.calls)[0], { tokenFile: 'host.json', method: 'rpc', requestId: 'test-id', args: { name: 'sendnative_live3', method: 'sendText', params: [{ to: chatId, text: 'mock-only', requestId: 'test-id' }] } });
+  assert.deepEqual(sendCalls(fx.calls)[0], { tokenFile: 'host.json', method: 'rpc', requestId: 'test-id', args: { name: NATIVE_SEND_SCRIPT, method: 'sendText', params: [{ to: chatId, text: 'mock-only', requestId: 'test-id' }] } });
   await fx.adapter.close();
   assert.equal(fx.calls.length, 3);
 });
@@ -297,4 +300,51 @@ test('ids reports canSend false when independently verified reading belongs to a
   const result = await fx.adapter.ids();
   assert.equal(result.users.every(row => row.canSend === false), true);
   assert.equal(sendCalls(fx.calls).length, 0);
+});
+
+test('image send stages bytes, uses a distinct RPC and retains the same single-target journal boundary', async () => {
+  const fx = fixture({ runtime: { imageSendValidated: true, imageProloguesVerified: true } });
+  const result = await fx.adapter.send({ to: chatId, image: 'original.png', requestId: 'image-test' });
+  assert.equal(result.type, 'image');
+  assert.equal(result.deliveryConfirmed, false);
+  const nativeCalls = fx.calls.filter(call => call.args?.method === 'sendImage');
+  assert.equal(nativeCalls.length, 1);
+  assert.match(nativeCalls[0].args.params[0].imageResource, /^wxcc-image-[a-f0-9-]{36}$/);
+  assert.equal(nativeCalls[0].args.params[0].imagePath, undefined);
+  assert.equal(nativeCalls[0].args.params[0].imageSha256, 'c'.repeat(64));
+  assert.equal(fx.records.get('image-test').status, 'accepted');
+  assert.equal(JSON.stringify(fx.records.get('image-test')).includes('original.png'), false);
+  await assert.rejects(fx.adapter.send({ to: chatId, image: 'another.png', requestId: 'IMAGE-TEST' }), { code: 'E_SEND_REQUEST_REUSED' });
+  assert.equal(fx.calls.filter(call => call.args?.method === 'sendImage').length, 1);
+});
+
+test('image send rejects mismatched scope and unverified image ABI before reading image files', async () => {
+  for (const args of [{ to: 'wxid_other', image: 'a.png' }, { to: chatId, text: 'text', image: 'a.png' }, { to: chatId, image: 'a.png' }]) {
+    let stages = 0;
+    const fx = fixture({ stageImageImpl: async () => { stages++; throw Error('must not stage'); }, runtime: { imageValidationAllowed: true, imageSendValidated: false, imageProloguesVerified: true } });
+    await assert.rejects(fx.adapter.send(args));
+    assert.equal(stages, 0);
+    assert.equal(fx.calls.some(call => call.args?.method === 'sendImage'), false);
+    assert.equal(fx.records.size, 0);
+  }
+});
+
+test('image transport and native unknown outcomes reserve the request without retries', async () => {
+  const fx = fixture({ runtime: { imageSendValidated: true, imageProloguesVerified: true }, sendResult: { status: 'unknown' } });
+  await assert.rejects(fx.adapter.send({ to: chatId, image: 'a.png', requestId: 'unknown-image' }), { code: 'E_NATIVE_OUTCOME_UNKNOWN' });
+  assert.equal(fx.calls.filter(call => call.args?.method === 'sendImage').length, 1);
+  assert.equal((await fx.adapter.sendStatus({ requestId: 'unknown-image' })).status, 'unknown');
+});
+
+test('image resources from another account or failed cache writes never reserve or enter native send', async () => {
+  let cacheWrites = 0;
+  const changedAccount = fixture({ runtime: { imageSendValidated: true, imageProloguesVerified: true }, prepareImageResult: { self: 'wxid_changed_self' }, cacheImageImpl: async () => { cacheWrites++; } });
+  await assert.rejects(changedAccount.adapter.send({ to: chatId, image: 'a.png', requestId: 'wrong-resource-account' }), { code: 'E_IMAGE_CACHE_SCOPE' });
+  assert.equal(cacheWrites, 0);
+  assert.equal(changedAccount.records.size, 0);
+  assert.equal(changedAccount.calls.some(call => call.args?.method === 'sendImage'), false);
+  const failedCache = fixture({ runtime: { imageSendValidated: true, imageProloguesVerified: true }, cacheImageImpl: async () => { throw Object.assign(Error('cache failed'), { code: 'E_IMAGE_CACHE_WRITE' }); } });
+  await assert.rejects(failedCache.adapter.send({ to: chatId, image: 'a.png', requestId: 'cache-write-failed' }), { code: 'E_IMAGE_CACHE_WRITE' });
+  assert.equal(failedCache.records.size, 0);
+  assert.equal(failedCache.calls.some(call => call.args?.method === 'sendImage'), false);
 });

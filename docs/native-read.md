@@ -26,7 +26,7 @@ npm.cmd ci
 .\wxcc.cmd start --pid 12345 --install-path "D:\Apps\Weixin" --timeout 60000 --json
 ```
 
-PID 为示例值。`start` 启动隐藏的常驻读取宿主，或复用相同进程、版本和源码的就绪宿主。初始化加载 `readnative_live4`，核验当前账号，并用本人会话的单条历史验证读取能力。整个过程不发送消息，也不重启微信。
+PID 为示例值。`start` 启动隐藏的常驻读取宿主，或复用相同进程、版本和源码的就绪宿主。初始化加载 `readnative_live5`，核验当前账号，并用本人会话的单条历史验证读取能力。整个过程不发送消息，也不重启微信。
 
 默认读取描述文件为 `data/native-read-host.json`，启动日志为 `data/native-read-host.log`；描述含本机访问 Token，不得共享。默认启动期限为 60000 毫秒，允许 `--timeout` 1000 至 180000。启动锁避免多个 CLI 同时连接。仅明确证明宿主进程已不存在且端口拒绝连接时，旧描述才可归档；忙碌、未知状态、其他进程或源码不一致均不覆盖。
 
@@ -56,7 +56,7 @@ node .\src\native-read-bootstrap.mjs
 
 如果看到 `E_ACCOUNT_CHANGED`，说明读取连接还记着之前的账号。旧版后台可能显示为 `E_OPERATION: E_ACCOUNT_CHANGED`，处理方法相同。`start` 会在读取任务空闲时重新绑定当前账号，清空旧的联系人缓存和历史验证，再验证新账号。恢复后用 `ids` 或 `db list` 获取当前账号的编号。
 
-升级前已经加载的已知 `readnative_live3` 会保留；程序核对其源码与空闲状态后，加载新的 `readnative_live4`。这个恢复过程不卸载驻留脚本，不结束微信。若仍提示忙碌、未知任务或源码不匹配，请按下方[恢复说明](#脱敏驻留与恢复)检查。
+升级前已经加载的已知 `readnative_live3` / `readnative_live4` 会保留；程序核对其源码与空闲状态后，加载新的 `readnative_live5`。这个恢复过程不卸载驻留脚本，不结束微信。若仍提示忙碌、未知任务或源码不匹配，请按下方[恢复说明](#脱敏驻留与恢复)检查。
 
 ## 当前账号和稳定编号
 
@@ -93,7 +93,7 @@ node .\src\native-read-bootstrap.mjs
 
 编号为虚构示例，使用实际 `ids` 返回值。本人会话可用 `account` 返回的编号；其他目标须存在于当前已验证的联系人快照。旧登记、同名联系人或邻近内存不能代替验证。
 
-`--limit` 为 1 至 200，默认 30。当前返回最近的有限条历史，没有游标分页、全量导出、原生会话列表或原生新消息监听。单次读取不自动持久化正文。空 `messages` 表示本次业务查询没有返回记录，不应推断数据库所有时间范围均无消息。
+`--limit` 为 1 至 200，默认 30。当前返回最近的有限条历史，没有游标分页、全量导出、原生会话列表或原生新消息监听。单次读取不自动持久化普通正文；图片与表情包会自动归档可用文件和媒体元数据，见 [媒体说明](media.md)。空 `messages` 表示本次业务查询没有返回记录，不应推断数据库所有时间范围均无消息。
 
 结果检查账号、目标、PID、`generation`、`bindingRevision` 和消息 DTO。`historyAvailable:true` 与 `schemaValidated:true` 表明当前调用路径和结果结构通过校验，`automaticMessagesSent:0` 表明该操作未发送消息。
 
@@ -105,7 +105,8 @@ node .\src\native-read-bootstrap.mjs
 | `createTime` | 原生秒级时间，十进制字符串 |
 | `timestamp` | 在可精确表示范围内转换的毫秒数 |
 | `type`、`subType` | 原生业务类型，十进制字符串；不把未知类型猜成文本 |
-| `content`、`text` | 返回正文；媒体或系统消息可能为业务文本，不能据此声称附件已下载 |
+| `content`、`text` | 返回正文；媒体或系统消息可能为业务文本 |
+| `rawXml`、`media` | 原始媒体引用与类型；保存结果查看顶层 `media.saved` 和本地画廊 |
 | `chatId` | 已验证会话 ID，展示默认脱敏 |
 | `senderUsername`、`senderId` | 实际返回的发言人 ID；缺失时保留未知 |
 | `isSelf` | 发言人明确时为布尔值；缺失时为 `null` |

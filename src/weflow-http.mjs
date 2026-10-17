@@ -79,7 +79,7 @@ export function normalizeApiMessage(raw, to, self, { source = SOURCE } = {}) {
   if (!Number.isSafeInteger(raw.localType) || raw.localType < 0) throw new WxError('E_WEFLOW_MESSAGE', 'localType 必须为有效整数。');
   const text = [raw.content, raw.parsedContent, raw.rawContent].find(value => typeof value === 'string');
   if (text === undefined) throw new WxError('E_WEFLOW_MESSAGE', '消息正文缺少有效字符串。');
-  return { ...normalizeMessage({ id, chatId: to, senderId, isSelf, type: TYPES.get(raw.localType) ?? `wechat:${raw.localType}`, text, timestamp: seconds * 1000 }), source };
+  return { ...normalizeMessage({ id, chatId: to, senderId, isSelf, type: TYPES.get(raw.localType) ?? `wechat:${raw.localType}`, text, rawContent: raw.rawContent, media: raw.media, imagePath: raw.imagePath, localPath: raw.localPath, imageUrl: raw.imageUrl, timestamp: seconds * 1000 }), source };
 }
 
 /** Read-only API client. It never invokes a message-send endpoint. */

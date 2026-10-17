@@ -1,4 +1,5 @@
 import { WxError } from './errors.mjs';
+import { describeMessageMedia } from './media.mjs';
 
 function id(value, field) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 512) {
@@ -22,6 +23,8 @@ export function normalizeMessage(input) {
   if (typeof message.type !== 'string' || !message.type) throw new WxError('E_MESSAGE', 'type 必须是非空字符串。');
   if (typeof message.text !== 'string' || message.text.length > 1024 * 1024) throw new WxError('E_MESSAGE', 'text 必须是长度受限的字符串。');
   if (!Number.isSafeInteger(message.timestamp) || message.timestamp < 0) throw new WxError('E_MESSAGE', 'timestamp 必须为毫秒整数。');
+  const media = describeMessageMedia(input);
+  if (media.length) message.media = media;
   return message;
 }
 

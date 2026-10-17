@@ -11,10 +11,10 @@ export class CliError extends Error {
   }
 }
 
-const commands = new Set(['start', 'decrypt', 'configure-target', 'db', 'record', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
+const commands = new Set(['start', 'decrypt', 'configure-target', 'db', 'record', 'doctor', 'status', 'inspect', 'account', 'accounts', 'ids', 'list', 'contacts', 'history', 'media', 'watch', 'probe', 'send', 'send-status', 'help', 'exit', 'quit']);
 const globalFlags = new Set(['json', 'verbose']);
 const globalValues = new Set(['pid', 'profile', 'self', 'backend', 'url', 'token-file', 'root', 'account-dir', 'key-file', 'interval', 'redact', 'install-path', 'data-root', 'timeout']);
-const localValues = new Set(['to', 'session', 'request-id', 'text', 'limit', 'seconds', 'keyword', 'database', 'input', 'output', 'key-mode', 'copy', 'record-id', 'message-id', 'text-file', 'timestamp', 'revision', 'change-id']);
+const localValues = new Set(['to', 'session', 'request-id', 'text', 'image', 'media-root', 'limit', 'seconds', 'keyword', 'database', 'input', 'output', 'key-mode', 'copy', 'record-id', 'message-id', 'text-file', 'timestamp', 'revision', 'change-id']);
 
 export const HELP = renderHelp();
 
@@ -111,7 +111,7 @@ export function parseArgs(argv) {
     if (Object.keys(values).length) throw new CliError('请先指定命令。');
     return { command, options, args: {} };
   }
-  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : command === 'history' ? ['to', 'limit'] : command === 'watch' ? ['to'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'decrypt' ? ['database', 'output', 'key-mode', 'show-key'] : command === 'db' ? ['database', 'input', 'output', 'key-mode', 'show-key'] : command === 'record' ? ['to', 'limit', 'input', 'output', 'copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision', 'change-id'] : [];
+  const allowed = ['list', 'contacts', 'ids'].includes(command) ? ['keyword'] : ['history', 'media'].includes(command) ? ['to', 'limit', 'output', 'media-root'] : command === 'watch' ? ['to', 'output', 'media-root'] : command === 'probe' ? ['to', 'seconds'] : command === 'send' ? ['to', 'session', 'request-id', 'text', 'image', 'pick'] : command === 'send-status' ? ['request-id'] : command === 'configure-target' ? ['to'] : command === 'decrypt' ? ['database', 'output', 'key-mode', 'show-key'] : command === 'db' ? ['database', 'input', 'output', 'key-mode', 'show-key'] : command === 'record' ? ['to', 'limit', 'input', 'output', 'copy', 'record-id', 'message-id', 'text', 'text-file', 'timestamp', 'revision', 'change-id'] : [];
   for (const key of Object.keys(values)) {
     if (!allowed.includes(key)) throw new CliError(`${command} 不支持 --${key}。`);
   }
@@ -193,16 +193,17 @@ export function parseArgs(argv) {
     args.requestId = args['request-id'];
     delete args['request-id'];
   }
-  if (['history', 'watch', 'probe', 'send'].includes(command)) {
+  if (['history', 'media', 'watch', 'probe', 'send'].includes(command)) {
     if (args.to === undefined && !args.pick && (command !== 'send' || args.session === undefined) && positionals.length) args.to = nonempty(positionals.shift(), '会话 ID');
-    if (command === 'send' && args.text === undefined && positionals.length) args.text = nonempty(positionals.shift(), '正文');
-    if (command === 'history' && args.to === undefined) throw new CliError('history 需要明确指定 --to <id>。');
+    if (command === 'send' && args.text === undefined && args.image === undefined && positionals.length) args.text = nonempty(positionals.shift(), '正文');
+    if (['history', 'media'].includes(command) && args.to === undefined) throw new CliError(`${command} 需要明确指定 --to <id>。`);
     if (command === 'send' && [args.to !== undefined, args.session !== undefined, args.pick === true].filter(Boolean).length !== 1) throw new CliError('send 必须且只能指定 --to、--session 或 --pick 之一。');
-    if (command === 'send' && args.text === undefined) throw new CliError('send 需要明确指定 --text <正文>。');
-    if (command === 'send') nonempty(args.text, '--text');
-    if (command === 'history') args.limit ??= 30;
+    if (command === 'send' && [args.text !== undefined, args.image !== undefined].filter(Boolean).length !== 1) throw new CliError('send 必须且只能指定 --text <正文> 或 --image <本地图片>。');
+    if (command === 'send' && args.text !== undefined) nonempty(args.text, '--text');
+    if (['history', 'media'].includes(command)) args.limit ??= 30;
     if (command === 'probe') args.seconds ??= 30;
     if (command === 'send' && args['request-id'] !== undefined) { args.requestId = args['request-id']; delete args['request-id']; }
+    if (args['media-root'] !== undefined) { args.mediaRoot = args['media-root']; delete args['media-root']; }
   }
   if (positionals.length) throw new CliError(`多余参数：${positionals.join(' ')}。含空格的正文请加引号。`);
   return { command, options, args };
@@ -317,7 +318,7 @@ export async function runCli(argv = [], dependencies = {}) {
 
   async function execute(parsed) {
     const options = { ...baseOptions, ...parsed.options };
-    if (['start', 'decrypt', 'configure-target', 'db', 'record', 'account', 'accounts', 'history', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
+    if (['start', 'decrypt', 'configure-target', 'db', 'record', 'account', 'accounts', 'history', 'media', 'send', 'ids', 'send-status'].includes(parsed.command) && options.backend === undefined) options.backend = 'reverse-native';
     if (parsed.command === 'help') {
       output.write(options.json ? `${stringify(helpData(parsed.args.topic), true)}\n` : renderHelp(parsed.args.topic));
       return;
@@ -358,6 +359,7 @@ export async function runCli(argv = [], dependencies = {}) {
       case 'list': result = await client.list(parsed.args); break;
       case 'contacts': result = await client.contacts(parsed.args); break;
       case 'history': result = await client.history(parsed.args); break;
+      case 'media': result = await client.media(parsed.args); break;
       case 'send': {
         let args = parsed.args;
         if (args.pick) {

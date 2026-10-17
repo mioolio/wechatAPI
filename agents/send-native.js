@@ -1,4 +1,4 @@
-// Weixin 4.1.15.13 x64: native coroutine dispatch and authorized text-send business ABI.
+// Weixin 4.1.15.13 x64: native coroutine dispatch and authorized text/image business ABI.
 'use strict';
 const PREFIX={
  '47310':'48 89 d0 48 8b 91 18 03 00 00 48 85 d2 74 1a', '2fb010':'55 41 57 41 56 56 57 53 48 81 ec c8 01 00 00',
@@ -9,12 +9,18 @@ const PREFIX={
  '460a40':'55 56 57 48 81 ec 90 00 00 00','100a690':'55 41 57 41 56 41 54 56 57 53 48 81 ec f0 05 00 00',
  '88ad0':'41 57 41 56 56 57 53 48 83 ec 20','2010':'48 83 ec 28 48 8b 41 18 48 83 f8 10',
  '54b02f0':'55 41 57 41 56 41 55 41 54 56 57 53 48 81 ec 18 03 00 00',
+ '2ba7a20':'55 41 57 41 56 41 55 41 54 56 57 53 48 81 ec 78 05 00 00',
+ 'a0f450':'55 56 57 53 48 81 ec 58 01 00 00 48 8d ac 24 80 00 00 00',
+ '7a60':'48 83 ec 28 48 8b 41 18 48 83 f8 08',
  '107050':'55 48 83 ec 30 48 8d 6c 24 30 48 c7 45 f8 fe ff ff ff 48 8b 09',
 };
 const tasks=new Map();let nextTask=0;
 const requests=new Map(),callbacks=new Map();
+const imageResources=new Map();
 const VERIFIED_DLL_SHA256='10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5';
-let binding=null,sendValidated=false,preparing=false;
+let binding=null,sendValidated=false,imageSendValidated=false,imageValidationAllowed=false,imageRuntimeBlocked=false,preparing=false;
+const isIndividualId=value=>typeof value==='string'&&/^[A-Za-z][A-Za-z0-9_.:-]{0,255}$/.test(value)&&!value.startsWith('gh_')&&!/^u_[a-f0-9]{16}$/.test(value)&&!['filehelper','weixin','newsapp','fmessage','medianote','qqmail','qmessage','tmessage','floatbottle','shakeapp','facebookapp','feedsapp','voiceinputapp','notification_messages','brandsessionholder'].includes(value);
+const isTargetId=value=>value==='filehelper'||isIndividualId(value);
 function moduleVerified(){const m=Process.getModuleByName('Weixin.dll');if(Process.arch!=='x64'||!m.path.replaceAll('\\','/').includes('/4.1.15.13/Weixin.dll'))throw Error('E_VERSION');return m;}
 function fn(r,ret,args){const m=moduleVerified(),p=m.base.add(r);if(!Process.findRangeByAddress(p)?.protection.includes('x'))throw Error('E_CODE_REGION');const expected=PREFIX[r.toString(16)]?.split(' ').filter(Boolean).map(x=>parseInt(x,16));if(!expected?.length)throw Error('E_PROLOGUE_MISSING:'+r.toString(16));const actual=new Uint8Array(p.readByteArray(expected.length));if(!expected.every((b,i)=>b===actual[i]))throw Error('E_PROLOGUE:'+r.toString(16));return new NativeFunction(p,ret,args,{abi:'win64',scheduling:'cooperative'});}
 function pair(){const p=Memory.alloc(16);p.writePointer(ptr(0));p.add(8).writePointer(ptr(0));return p;}
@@ -23,7 +29,7 @@ function text(p){const n=p.add(16).readU64().toNumber(),c=p.add(24).readU64().to
 function accountIdentity(owner){
  const p=owner.readPointer(),range=Process.findRangeByAddress(p),m=moduleVerified();
  if(p.isNull()||owner.add(8).readPointer().isNull()||!range?.protection.includes('r')||p.add(0x88).compare(range.base.add(range.size))>0||!p.readPointer().equals(m.base.add(0x8dfe2f8)))throw Error('E_ACCOUNT_TYPE');
- const self=text(p.add(0x48));if(typeof self!=='string'||!/^[A-Za-z][A-Za-z0-9_.:-]{0,255}$/.test(self)||self.startsWith('gh_'))throw Error('E_ACCOUNT_ID');
+ const self=text(p.add(0x48));if(!isIndividualId(self))throw Error('E_ACCOUNT_ID');
  return {account:p.toString(),self};
 }
 function verifyBoundAccount(){
@@ -85,27 +91,35 @@ function queue(callback){
 function currentTask() {const p=pair();fn(0x48af50,'pointer',['pointer'])(p);if(p.readPointer().isNull())throw Error('E_NATIVE_TASK_SCOPE');return p;}
 function inspect() {
  moduleVerified();for(const key of Object.keys(PREFIX))fn(parseInt(key,16),'void',[]);
- return {pid:Process.id,generation:binding?.generation??null,version:'4.1.15.13',dllSha256:VERIFIED_DLL_SHA256,self:binding?.self??null,accountVerified:binding!==null,ready:binding!==null,sendValidated,chatId:binding?.chatId??null,sessionId:binding?.sessionId??null,displayName:binding?.displayName??null,prologuesVerified:true,pendingTasks:tasks.size,pendingCallbacks:callbacks.size,entryRva:'0x54b02f0',dispatch:'Weixin native coroutine queue',foregroundRequired:false,contactSnapshotAvailable:contactSnapshotValidated,lastContactPhase};
+ return {pid:Process.id,generation:binding?.generation??null,version:'4.1.15.13',dllSha256:VERIFIED_DLL_SHA256,self:binding?.self??null,accountVerified:binding!==null,ready:binding!==null&&!imageRuntimeBlocked,sendValidated,imageSendValidated,imageValidationAllowed,imageProloguesVerified:true,imageEntryRva:'0x2ba7a20',chatId:binding?.chatId??null,sessionId:binding?.sessionId??null,displayName:binding?.displayName??null,prologuesVerified:true,pendingTasks:tasks.size,pendingCallbacks:callbacks.size,entryRva:'0x54b02f0',dispatch:'Weixin native coroutine queue',foregroundRequired:false,contactSnapshotAvailable:contactSnapshotValidated,lastContactPhase};
 }
 async function prepare(config) {
  if(binding||preparing)throw Error('E_ALREADY_BOUND');
- const isId=value=>typeof value==='string'&&/^[A-Za-z][A-Za-z0-9_.:-]{0,255}$/.test(value)&&!value.startsWith('gh_')&&!/^u_[a-f0-9]{16}$/.test(value)&&!['filehelper','weixin','newsapp','fmessage','medianote','qqmail','qmessage','tmessage','floatbottle','shakeapp','facebookapp','feedsapp','voiceinputapp','notification_messages','brandsessionholder'].includes(value);
- if(!config||config.pid!==Process.id||!isId(config.chatId)||!isId(config.self)||config.sessionId!==config.chatId||typeof config.displayName!=='string'||!config.displayName.trim()||config.displayName.length>4096||/[\0\r\n]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(config.displayName)||config.chatId===config.displayName||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(config.generation??''))throw Error('E_BINDING_SCOPE');
+ if(!config||config.pid!==Process.id||!isTargetId(config.chatId)||!isIndividualId(config.self)||config.sessionId!==config.chatId||typeof config.displayName!=='string'||!config.displayName.trim()||config.displayName.length>4096||/[\0\r\n]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(config.displayName)||config.chatId===config.displayName||!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(config.generation??''))throw Error('E_BINDING_SCOPE');
  preparing=true;try{
  const proof=await queue(()=>{const task=currentTask();try{return {...lookup(config.chatId,config.displayName),taskState:task.readPointer().add(0x388).readU32(),nativeThreadId:Process.getCurrentThreadId()};}finally{release(task);}});
  if(proof.self!==config.self||proof.chatId!==config.chatId||!proof.displayNameMatches)throw Error('E_TARGET_IDENTITY');
  binding={pid:Process.id,generation:config.generation,self:config.self,chatId:config.chatId,sessionId:config.chatId,displayName:config.displayName,account:proof.account};
  // The host may reuse a recorded real send validation for this exact binary. Target/account proof is fresh for every prepare.
  sendValidated=config.validatedBinarySha256===VERIFIED_DLL_SHA256;
+ imageSendValidated=config.validatedImageBinarySha256===VERIFIED_DLL_SHA256;
+ imageValidationAllowed=config.allowImageValidation===true&&config.chatId==='filehelper';
  return {...inspect(),identityProof:{username:proof.chatId,nicknameMatches:proof.nicknameMatches,remarkMatches:proof.remarkMatches,taskState:proof.taskState,nativeThreadId:proof.nativeThreadId}};
  }finally{preparing=false;}
 }
-function validateRequest(input) {
+function validateRequest(input,kind='text') {
  if(!binding||input?.to!==binding.chatId)throw Error('E_CHAT_SCOPE');
+ if(imageRuntimeBlocked||tasks.size>0||callbacks.size>0)throw Error('E_NATIVE_SEND_BUSY');
  if(!sendValidated)throw Error('E_SEND_BINARY_UNVERIFIED');
  if(typeof input.requestId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(input.requestId)||input.requestId!==input.requestId.toLowerCase())throw Error('E_REQUEST_ID');
- const content=input.text;
- if(typeof content!=='string'||!content.trim()||content.includes('\0')||/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(content)||unescape(encodeURIComponent(content)).length>1024)throw Error('E_TEXT');
+ if(kind==='image'){
+  if(!imageSendValidated&&!(imageValidationAllowed&&binding.chatId==='filehelper'))throw Error('E_IMAGE_BINARY_UNVERIFIED');
+  if(typeof input.imageResource!=='string'||!/^wxcc-image-[a-f0-9-]{36}$/.test(input.imageResource)||!/^[a-f0-9]{64}$/.test(input.imageSha256??''))throw Error('E_IMAGE_PATH');
+  const resource=imageResources.get(input.imageResource);if(!resource||resource.sha256!==input.imageSha256||resource.used)throw Error('E_IMAGE_RESOURCE');
+ }else{
+  const content=input.text;
+  if(typeof content!=='string'||!content.trim()||content.includes('\0')||/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(content)||unescape(encodeURIComponent(content)).length>1024)throw Error('E_TEXT');
+ }
  if(requests.has(input.requestId))throw Error('E_REQUEST_DUPLICATE');
  if(requests.size>=10000)throw Error('E_REQUEST_LIMIT');
 }
@@ -154,7 +168,75 @@ async function sendText(input) {
   return await pending.promise;
  }catch(error){entry.error=String(error);entry.status=entry.nativeEntryCalled||error.code==='E_TASK_STARTED_UNKNOWN'?'unknown':'failed';return {requestId:input.requestId,status:entry.status,chatId:binding.chatId,sessionId:binding.sessionId,native:true,error:entry.error};}
 }
-rpc.exports={inspect,prepare,sendText,contacts:contactsSnapshot,accountLayout,requestStatus(id){const result=requests.get(id);return result?{requestId:id,...result}:null;}};
+// The native business entry accepts a resource key and resolves it into the app's
+// HttpResource cache. It does not accept an ordinary local file path.
+async function prepareImage(input){
+ if(!binding||input?.to!==binding.chatId)throw Error('E_CHAT_SCOPE');
+ if(imageRuntimeBlocked||tasks.size>0||callbacks.size>0)throw Error('E_NATIVE_SEND_BUSY');
+ if(!sendValidated||(!imageSendValidated&&!(imageValidationAllowed&&binding.chatId==='filehelper')))throw Error('E_IMAGE_BINARY_UNVERIFIED');
+ if(!/^wxcc-image-[a-f0-9-]{36}$/.test(input.imageResource??'')||!/^[a-f0-9]{64}$/.test(input.imageSha256??'')||imageResources.has(input.imageResource)||imageResources.size>=1000)throw Error('E_IMAGE_RESOURCE');
+ return await queue(isCancelled=>{
+  const task=currentTask(),resource=Memory.alloc(32),empty=Memory.alloc(32),result=Memory.alloc(32);let constructed=0,returned=false;
+  try{
+   const proof=lookup(binding.chatId,binding.displayName);if(isCancelled())throw Error('E_TASK_CANCELLED');if(proof.self!==binding.self||proof.chatId!==binding.chatId||!proof.displayNameMatches||proof.account!==binding.account)throw Error('E_ACCOUNT_OR_TARGET_CHANGED');
+   const ctor=fn(0x88ad0,'pointer',['pointer','pointer']);ctor(resource,Memory.allocUtf8String(input.imageResource));constructed=1;ctor(empty,Memory.allocUtf8String(''));constructed=2;
+   if(isCancelled())throw Error('E_TASK_CANCELLED');verifyBoundAccount();
+   fn(0xa0f450,'pointer',['pointer','pointer','pointer'])(result,resource,empty);returned=true;
+   const length=result.add(16).readU64().toNumber(),capacity=result.add(24).readU64().toNumber();
+   if(!Number.isSafeInteger(length)||length<1||length>32767||!Number.isSafeInteger(capacity)||capacity<length||capacity>65536)throw Error('E_IMAGE_CACHE_PATH');
+   const cachePath=(capacity<8?result:result.readPointer()).readUtf16String(length);
+   if(typeof cachePath!=='string'||cachePath.includes('\0')||!/^[A-Za-z]:[\\/].*[\\/]HttpResource[\\/][a-f0-9]{32,64}$/i.test(cachePath)||cachePath.split(/[\\/]/).includes('..'))throw Error('E_IMAGE_CACHE_PATH');
+   verifyBoundAccount();imageResources.set(input.imageResource,{sha256:input.imageSha256,used:false});
+   return {pid:Process.id,generation:binding.generation,self:binding.self,chatId:binding.chatId,imageResource:input.imageResource,imageSha256:input.imageSha256,cachePath,automaticMessagesSent:0};
+  }finally{
+   let cleanupError=null;
+   for(const [needed,rva,p] of [[returned,0x7a60,result],[constructed>=2,0x2010,empty],[constructed>=1,0x2010,resource]]){if(needed)try{fn(rva,'void',['pointer'])(p);}catch(error){cleanupError??=error;}}
+   try{release(task);}catch(error){cleanupError??=error;}if(cleanupError){imageRuntimeBlocked=true;throw cleanupError;}
+  }
+ });
+}
+// Static call chain: native dispatcher 0x54a6fb0 -> image business 0x2ba7a20 ->
+// native image factory 0x1d670f0 -> MessageManager 0x178f040. The entry owns no
+// incoming pointers. Its 0x38-byte result owns only the std::string at +0x18.
+// Initial send-stage acceptance does not establish server delivery.
+function nativeSendImage(input,entry,isCancelled){
+ const recipient=Memory.alloc(32),path=Memory.alloc(32),result=Memory.alloc(0x38);
+ result.writeByteArray(new Uint8Array(0x38));
+ const keep={recipient,path,result,constructed:0};entry.keep=keep;
+ const ctor=fn(0x88ad0,'pointer',['pointer','pointer']),dtor=fn(0x2010,'void',['pointer']);
+ let resultReturned=false,receipt;
+ try{
+  const imageSend=fn(0x2ba7a20,'pointer',['pointer','pointer','pointer','pointer']);
+  ctor(recipient,Memory.allocUtf8String(input.to));keep.constructed=1;
+  ctor(path,Memory.allocUtf8String(input.imageResource));keep.constructed=2;
+  if(text(recipient)!==input.to||text(path)!==input.imageResource)throw Error('E_STRING_ROUNDTRIP');
+  if(isCancelled())throw Error('E_TASK_CANCELLED');
+  verifyBoundAccount();
+  entry.nativeEntryCalled=true;
+  imageSend(ptr(0),result,recipient,path);resultReturned=true;
+  const accepted=result.readU8()===1;
+  const resultMessage=text(result.add(0x18));
+  receipt={requestId:input.requestId,status:accepted?'accepted':'failed',type:'image',chatId:binding.chatId,sessionId:binding.sessionId,native:true,nativeEntryCalled:true,entryRva:'0x2ba7a20',deliveryConfirmed:false,...(accepted?{localId:result.add(8).readU64().toString(),createTime:result.add(0x10).readU64().toString()}:{}),...(resultMessage?{resultMessage}:{})};
+  if(accepted)imageSendValidated=true;
+ }catch(error){
+  entry.error=String(error);if(entry.nativeEntryCalled)imageRuntimeBlocked=true;
+  receipt={requestId:input.requestId,status:entry.nativeEntryCalled?'unknown':'failed',type:'image',chatId:binding.chatId,sessionId:binding.sessionId,native:true,nativeEntryCalled:entry.nativeEntryCalled,deliveryConfirmed:false,error:entry.error};
+ }finally{
+  // Only a normal returned result has an established live string object.
+  for(const [needed,p] of [[resultReturned,result.add(0x18)],[keep.constructed>=2,path],[keep.constructed>=1,recipient]]){if(needed)try{dtor(p);}catch(error){imageRuntimeBlocked=true;entry.error=String(error);receipt={...receipt,status:entry.nativeEntryCalled?'unknown':'failed',error:entry.error};}}
+  if(!imageRuntimeBlocked)delete entry.keep;
+ }
+ entry.status=receipt.status;entry.completedAt=new Date().toISOString();entry.receipt=receipt;
+ return receipt;
+}
+async function sendImage(input){
+ validateRequest(input,'image');
+ imageResources.get(input.imageResource).used=true;
+ const entry={status:'executing',createdAt:new Date().toISOString(),nativeEntryCalled:false};requests.set(input.requestId,entry);
+ try{return await queue(isCancelled=>{const task=currentTask();try{const proof=lookup(binding.chatId,binding.displayName);if(isCancelled())throw Error('E_TASK_CANCELLED');if(proof.self!==binding.self||proof.chatId!==binding.chatId||!proof.displayNameMatches||proof.account!==binding.account)throw Error('E_ACCOUNT_OR_TARGET_CHANGED');return nativeSendImage(input,entry,isCancelled);}finally{release(task);}});}
+ catch(error){entry.error=String(error);entry.status=entry.nativeEntryCalled||error.code==='E_TASK_STARTED_UNKNOWN'?'unknown':'failed';if(entry.status==='unknown')imageRuntimeBlocked=true;return {requestId:input.requestId,status:entry.status,type:'image',chatId:binding.chatId,sessionId:binding.sessionId,native:true,error:entry.error};}
+}
+rpc.exports={inspect,prepare,sendText,prepareImage,sendImage,contacts:contactsSnapshot,accountLayout,requestStatus(id){const result=requests.get(id);return result?{requestId:id,status:result.status,createdAt:result.createdAt,...(result.completedAt?{completedAt:result.completedAt}:{}),...(result.receipt?{receipt:result.receipt}:{})}:null;}};
 
 // Embeddable fragment for agents/send-native.js; no RPC, hook, queue, or call runs on load.
 // Static research against Weixin.dll 4.1.15.13, SHA-256:

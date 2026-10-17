@@ -3,7 +3,9 @@ import { recipientAlias } from './recipient-registry.mjs';
 const REDACTED = '[REDACTED]';
 const IDENTITY_FIELDS = new Set(['alias', 'username', 'wxid', 'chatid', 'sessionid', 'userid', 'accountid', 'recipientid', 'senderid', 'ownerid', 'senderusername', 'recipientusername', 'talker', 'talkerid', 'chat', 'recipient', 'sender', 'self', 'to', 'from']);
 const NAME_FIELDS = new Set(['name', 'displayname', 'nickname', 'remark', 'remarkname', 'contactname', 'chatname', 'sendername', 'recipientname']);
-const SECRET_FIELDS = new Set(['authorization', 'proxyauthorization', 'cookie', 'setcookie', 'headers', 'requestheaders', 'responseheaders', 'credentials', 'credential', 'key', 'salt', 'apikey', 'dbkey', 'wechatdbkey', 'privatekey', 'keymaterial', 'password', 'passwd', 'secret', 'token']);
+// Generated artifact locations must remain usable as paths/links when ID masking is enabled.
+const ARTIFACT_PATH_FIELDS = new Set(['directory', 'indexpath', 'indexurl', 'manifestpath']);
+const SECRET_FIELDS = new Set(['authorization', 'proxyauthorization', 'cookie', 'setcookie', 'headers', 'requestheaders', 'responseheaders', 'credentials', 'credential', 'key', 'aeskey', 'cdnthumbaeskey', 'cdnbigimgkey', 'cdnaeskey', 'salt', 'apikey', 'dbkey', 'wechatdbkey', 'privatekey', 'keymaterial', 'password', 'passwd', 'secret', 'token']);
 const keyName = key => String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
 function secretField(key) {
   const normalized = keyName(key);
@@ -39,7 +41,7 @@ export function createPrivacyFormatter({ enabled = true, registry, secrets = [],
     let output = value;
     for (const secret of secretValues) output = output.replaceAll(secret, REDACTED);
     output = output.replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+/gi, (_match, scheme) => `${scheme} ${REDACTED}`);
-    output = output.replace(/((?<![\w-])["']?(?:authorization|proxy-authorization|x-wxcc-token|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|cookie|set-cookie|dbkey|key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, (_match, prefix) => `${prefix}${REDACTED}`);
+    output = output.replace(/((?<![\w-])["']?(?:authorization|proxy-authorization|x-wxcc-token|x-api-key|api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|cookie|set-cookie|dbkey|aeskey|cdnthumbaeskey|cdnbigimgkey|cdnaeskey|key)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}\]]+)/gi, (_match, prefix) => `${prefix}${REDACTED}`);
     return output;
   }
   function textWithIds(value, ids) {
@@ -64,6 +66,8 @@ export function createPrivacyFormatter({ enabled = true, registry, secrets = [],
       if (typeof item === 'string') {
         const secretSafe = hideSecrets(item);
         if (NAME_FIELDS.has(normalized)) return secretSafe;
+        if (ARTIFACT_PATH_FIELDS.has(normalized)) return secretSafe;
+        if (normalized === 'requestid') return secretSafe;
         if (secretSafe !== item) return textWithIds(secretSafe, ids);
         if (/^\d+$/.test(item) && ['id', 'messageid', 'msgid', 'serverid', 'serveridraw', 'localid', 'clientmsgid', 'requestid'].includes(normalized)) return hideSecrets(item);
         if (normalized === 'maskedid') return hideSecrets(/^(?:wxid_)?(?:.{3}….{3}|…)$/u.test(item) ? item : maskIdentifier(item));

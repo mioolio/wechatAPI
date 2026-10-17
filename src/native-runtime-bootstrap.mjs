@@ -36,6 +36,15 @@ export function hasPriorNativeValidation(profile, host) {
     && typeof evidence.verifiedAt === 'string' && Number.isFinite(Date.parse(evidence.verifiedAt))
     && typeof evidence.requestId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(evidence.requestId));
 }
+export function hasPriorNativeImageValidation(profile, host) {
+  const evidence = profile?.nativeImageSendValidation;
+  return Boolean(evidence && profile.version === host.version && isHash(host.dllSha256)
+    && sameHash(profile.dllSha256, host.dllSha256) && sameHash(evidence.dllSha256, host.dllSha256)
+    && evidence.version === host.version && evidence.entryRva === '0x2ba7a20'
+    && evidence.status === 'accepted' && evidence.nativeEntryCalled === true
+    && typeof evidence.verifiedAt === 'string' && Number.isFinite(Date.parse(evidence.verifiedAt))
+    && typeof evidence.requestId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(evidence.requestId));
+}
 export function hasPriorContactValidation(profile, host, sourceSha256) {
   const evidence = profile?.nativeContactCacheValidation;
   return Boolean(evidence && profile.version === host.version && /^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') && /^[a-f0-9]{64}$/i.test(sourceSha256 ?? '')
@@ -84,8 +93,9 @@ export async function bootstrapNativeSend({ workspace = WORKSPACE, tokenFile = r
   if (!agent || agent.name !== NATIVE_SEND_SCRIPT || agent.loaded !== true || agent.destroyed === true || !sameHash(agent.sourceSha256, sourceSha256)) throw new WxError('E_NATIVE_SOURCE', '实际加载的发送脚本与当前源哈希或名称不匹配。');
   let runtime = await invoke('rpc', { name: NATIVE_SEND_SCRIPT, method: 'inspect', params: [] });
   const priorValidated = hasPriorNativeValidation(profile, host);
+  const priorImageValidated = hasPriorNativeImageValidation(profile, host);
   if (runtime?.generation === null && runtime?.ready === false) {
-    const config = { pid: host.pid, generation: host.generation, self: target.self, chatId: target.chatId, sessionId: target.chatId, displayName: target.displayName, ...(priorValidated ? { validatedBinarySha256: host.dllSha256.toLowerCase() } : {}) };
+    const config = { pid: host.pid, generation: host.generation, self: target.self, chatId: target.chatId, sessionId: target.chatId, displayName: target.displayName, ...(target.chatId === 'filehelper' ? { allowImageValidation: true } : {}), ...(priorImageValidated ? { validatedImageBinarySha256: host.dllSha256.toLowerCase() } : {}), ...(priorValidated ? { validatedBinarySha256: host.dllSha256.toLowerCase() } : {}) };
     runtime = await invoke('rpc', { name: NATIVE_SEND_SCRIPT, method: 'prepare', params: [config] });
   }
   requireBoundRuntime(runtime, host, target);
@@ -106,7 +116,7 @@ export async function bootstrapNativeSend({ workspace = WORKSPACE, tokenFile = r
     }
   }
   await save(bindingFile, binding);
-  return { source: 'reverse-native', prepared: true, pid: host.pid, generation: host.generation, self: target.self, accountVerified: true, chatId: target.chatId, sessionId: target.chatId, displayName: target.displayName, version: host.version, prologuesVerified: true, ready: priorValidated && runtime.sendValidated === true, sendValidated: priorValidated && runtime.sendValidated === true, priorBinaryValidation: priorValidated, contactSnapshotAvailable: runtime.contactSnapshotAvailable === true, priorContactValidation: priorContactValidated, ...(contactCount === undefined ? {} : { contactCount }), automaticMessagesSent: 0 };
+  return { source: 'reverse-native', prepared: true, pid: host.pid, generation: host.generation, self: target.self, accountVerified: true, chatId: target.chatId, sessionId: target.chatId, displayName: target.displayName, version: host.version, prologuesVerified: true, ready: priorValidated && runtime.sendValidated === true, sendValidated: priorValidated && runtime.sendValidated === true, priorBinaryValidation: priorValidated, imageSendValidated: runtime.imageSendValidated === true, imageSendAvailable: priorValidated && runtime.sendValidated === true && runtime.imageSendValidated === true && runtime.imageProloguesVerified === true, priorImageValidation: priorImageValidated, contactSnapshotAvailable: runtime.contactSnapshotAvailable === true, priorContactValidation: priorContactValidated, ...(contactCount === undefined ? {} : { contactCount }), automaticMessagesSent: 0 };
 }
 
 export async function runNativeRuntimeBootstrap(argv = process.argv.slice(2)) {

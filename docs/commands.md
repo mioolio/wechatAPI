@@ -1,6 +1,6 @@
 # WXcc 命令使用手册
 
-WXcc 可以读取当前微信账号、查找联系人和最近聊天记录，也可以把记录保存成本地副本，再修改、撤销和导出。原生功能目前要求 **Windows x64、Node.js 24+、微信 4.1.15.13 x64**，且微信 DLL 指纹必须匹配；具体指纹见 [原生读取说明](native-read.md#版本和自动启动)。
+WXcc 可以读取当前微信账号、查找联系人和最近聊天记录，识别并保存图片与表情包，发送文字或本地图片，也可以把记录保存成本地副本，再修改、撤销和导出。原生功能目前要求 **Windows x64、Node.js 24+、微信 4.1.15.13 x64**，且微信 DLL 指纹必须匹配；具体指纹见 [原生读取说明](native-read.md#版本和自动启动)。
 
 ## 目录
 
@@ -8,6 +8,7 @@ WXcc 可以读取当前微信账号、查找联系人和最近聊天记录，也
 - [先读到一段聊天记录](#先读到一段聊天记录)
 - [启动和状态命令](#启动和状态命令)：`start`、`doctor` / `status`、`inspect`
 - [账号、编号和聊天记录](#账号编号和聊天记录)：`account`、`accounts`、`ids`、`history`
+- [图片与表情包](#图片与表情包)：`media --to USER --output DIR`、`history --output DIR`
 - [本地聊天副本：修改、撤销与导出](#本地聊天副本修改撤销与导出)：`record import/list/show/edit/changes/undo/export`
 - [目标配置、发送与账本](#目标配置发送与账本)：`configure-target`、发送准备、`send`、`send-status`
 - [数据库命令](#数据库命令)：一键 `decrypt`，按库操作 `db list/status/decrypt`
@@ -256,17 +257,19 @@ $targetAlias = Read-Host "粘贴目标的 alias（u_ 开头）"
 
 ### `history` — 读取指定聊天的最近记录
 
-返回指定个人会话最近的有限条记录，不需要数据库密钥。
+返回指定个人会话最近的有限条记录，不需要数据库密钥；识别出图片或表情包时会尝试保存可取得的媒体文件。
 
 ```text
-.\wxcc.cmd history --to USER [--limit 30] [--json]
-.\wxcc.cmd history USER [--limit 30] [--json]
+.\wxcc.cmd history --to USER [--limit 30] [--output DIR] [--media-root DIR] [--json]
+.\wxcc.cmd history USER [--limit 30] [--output DIR] [--media-root DIR] [--json]
 ```
 
 | 参数 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `--to` 或位置参数 `USER` | 是 | 无 | `ids` 返回的联系人编号；本人会话可用 `account.alias`；也接受准确完整个人会话 ID |
 | `--limit` | 否 | `30` | 原生范围 1–200 |
+| `--output` | 否 | `data/media/` 下的会话目录 | 媒体文件、画廊和清单的保存目录 |
+| `--media-root` | 否 | 当前账号的媒体缓存目录 | 手动指定允许读取的本机媒体来源目录，不是输出目录 |
 
 两例编号都换成同一个、刚从 `ids` 选定的实际 `alias`：
 
@@ -283,9 +286,47 @@ $targetAlias = Read-Host "粘贴目标的 alias（u_ 开头）"
 | `messages[].timestamp` | 毫秒时间戳 |
 | `messages[].createTime`、`type`、`subType` | 原生时间和类型，十进制字符串 |
 | `messages[].senderId`、`isSelf` | 发言人；不明确时 `isSelf:null`，不会猜成本人 |
+| `messages[].media[].kind` | `image` 为图片，`sticker` 为表情包 |
+| `media` | 媒体归档摘要，含保存目录、查看链接及未取得文件的原因 |
 | `schemaValidated`、`historyAvailable` | 结果结构和当前读取能力的验证结果 |
 
-其他人的目标必须在当前验证的联系人缓存中。单次读取不自动保存正文；要保留并编辑，使用 `record import`。目前没有历史分页或 `history --database`，解密数据库不会自动接入此命令。
+其他人的目标必须在当前验证的联系人缓存中；文件助手可用精确 ID `filehelper`。单次读取不自动保存正文；要保留并编辑，使用 `record import`。目前没有历史分页或 `history --database`，解密数据库不会自动接入此命令。
+
+## 图片与表情包
+
+### `media` — 保存媒体并取得查看链接
+
+读取指定聊天的最近记录，识别其中的图片和表情包，保存可取得的文件，返回媒体摘要；此命令不打印聊天正文。
+
+```text
+.\wxcc.cmd media --to USER [--limit 30] [--output DIR] [--media-root DIR] [--json]
+```
+
+| 参数 | 必填 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `--to` | 是 | 无 | 选定联系人的实际编号或精确完整 ID；文件助手可用 `filehelper` |
+| `--limit` | 否 | `30` | 最近消息条数，原生范围 1–200；不是要保存的图片数量 |
+| `--output` | 否 | `data/media/` 下的会话目录 | 保存解码后的图片、HTML 画廊和 JSON 清单，可用指定目录 |
+| `--media-root` | 否 | 当前账号的媒体缓存目录 | 允许读取的本机媒体来源目录；自动查找失败时手动指定 |
+
+```powershell
+.\wxcc.cmd media --to filehelper --limit 30 --output "D:\Private\WeChatMedia" --json
+.\wxcc.cmd media --to filehelper --output "D:\Private\WeChatMedia" --media-root "D:\WeChatData\CurrentAccount" --json
+```
+
+两例为替代用法，目录均为示意值；第二例的来源目录换成当前账号实际媒体缓存目录。读取准备步骤与 `history` 相同。
+
+| 关键返回字段 | 含义 |
+| --- | --- |
+| `media.directory` | 实际保存目录 |
+| `media.indexPath`、`media.indexUrl` | `wxcc-media-index.html` 画廊路径和本机 `file:` 查看链接 |
+| `media.manifestPath` | `wxcc-media-manifest.json` 清单路径 |
+| `media.saved`、`unavailable`、`total` | 归档中已保存、未取得和全部媒体条目数 |
+| `media.items[].kind`、`status` | 图片或表情包类型，以及 `saved` / `unavailable` 状态 |
+| `media.items[].filePath`、`fileUrl` | 已保存媒体文件的位置；CLI 展示可能脱敏，直接查看使用 `media.indexPath` / `indexUrl` |
+| `media.items[].reasonCode`、`reason` | 未取得媒体时的错误编号和原因 |
+
+重复使用同一输出目录会保留此前归档条目，所以总数可能包含本次查询范围外的旧媒体。`indexUrl` 与 `fileUrl` 供本机打开，不会上传到公开网站。媒体尚未下载、引用失效或加密格式不支持时，会保留 `unavailable` 及原因；识别出图片类型不代表原文件已经保存。更多来源、解码和验证边界见 [媒体说明](media.md)。
 
 ## 本地聊天副本：修改、撤销与导出
 
@@ -555,7 +596,7 @@ $targetAlias = Read-Host "粘贴目标的 alias（u_ 开头）"
 
 关键字段：`configured:true` 表示已保存，`requiresFreshSendBinding:true` 表示还需准备发送绑定，`automaticMessagesSent:0` 表示没有发送。
 
-目标保存在本机 `data/native-target.json`，与本人、联系人和客户端版本绑定。不能用昵称、群聊、公众号或服务会话；切换账号、目标或版本后重新配置。已运行的发送程序不会因重新配置而自动改绑其他人。
+目标保存在本机 `data/native-target.json`，与本人、联系人和客户端版本绑定。可用精确的 filehelper；不能用昵称、群聊、公众号或其他服务会话；切换账号、目标或版本后重新配置。已运行的发送程序不会因重新配置而自动改绑其他人。
 
 ### 发送宿主初始化
 
@@ -583,12 +624,12 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 同时确认 **`inspect` 的 `send.ready:true`**，以及**选定联系人 `canSend:true`**，才进行发送。缺少版本、目标绑定或当前运行状态验证时，入口保持关闭，不能仅凭顶层 `ready:true` 判断。高级重新核验和恢复规则见 [原生发送说明](native-send.md)。
 
-### `send` — 提交一条文本消息
+### `send` — 提交一条文字或图片消息
 
-向当前已配置且就绪的个人目标提交文字；执行此命令才会尝试真正发送。
+向当前已配置且就绪的个人目标提交文字或一张本地图片；执行此命令才会尝试真正发送。首次图片运行验证仅允许已绑定的文件助手 `filehelper`。
 
 ```text
-.\wxcc.cmd send (--to USER | --session STATE | --pick) --text TEXT
+.\wxcc.cmd send (--to USER | --session STATE | --pick) (--text TEXT | --image FILE)
                 [--request-id UNIQUE] [--json]
 .\wxcc.cmd send USER TEXT [--request-id UNIQUE] [--json]
 ```
@@ -598,7 +639,8 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 | `--to` | 三选一 | 无 | 已配置目标的实际编号或完整 ID |
 | `--session` | 三选一 | 无 | 当前绑定的完整会话标识；也可用该绑定目标编号 |
 | `--pick` | 三选一 | 关闭 | 先显示联系人，再输入本次列表里 `canSend:true` 的编号 |
-| `--text` | 是 | 无 | 非空、非全空白、完整 Unicode、不含 NUL，最多 1024 UTF-8 字节 |
+| `--text` | 与 `--image` 二选一 | 无 | 非空、非全空白、完整 Unicode、不含 NUL，最多 1024 UTF-8 字节 |
+| `--image` | 与 `--text` 二选一 | 无 | 本机普通图片文件，1 字节至 25 MiB，支持 PNG、JPEG、GIF、WebP、BMP；不接受网址或网络共享路径 |
 | `--request-id` | 否，脚本建议填写 | 自动 UUID | 每条新消息使用新 ID，便于查询和防止重复提交 |
 
 以下是三种**替代用法**，不是要求连续发三条。编号来自已配置且 `canSend:true` 的同一个实际目标；正文和请求 ID 为虚构示例：
@@ -609,11 +651,18 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 .\wxcc.cmd send --pick --text "这是一条文字发送示例。" --request-id example-text-003
 ```
 
+已将文件助手配置为发送目标、启动发送宿主并通过就绪检查后，可把下例路径换成自己的本地图片发送。每条新图片同样使用新的请求 ID：
+
+```powershell
+.\wxcc.cmd send --to filehelper --image "D:\Private\test-image.png" --request-id example-image-001 --json
+.\wxcc.cmd send-status --request-id example-image-001 --json
+```
+
 `--pick` 等待输入时，只输入本次列出的完整 `u_` 编号，不加命令前缀；`cancel`、空输入或结束输入会取消。此流程含交互，不适合按单个 JSON 对象解析。
 
 关键字段：`requestId` 是本次请求编号，`status` 是内部提交结果，`alias` / `displayName` 是目标，`deliveryConfirmed` 表示独立送达确认。**`accepted` 只表示客户端内部接受提交，不能保证对方收到或已读**；当前返回 `deliveryConfirmed:false`，没有独立服务端 ACK / 已读接口。
 
-请求 ID 为 1–128 位 ASCII，首位是字母或数字，其余可含 `._:-`，规范成小写。本机账本在调用前保留请求，同一 ID 不会再次发送，也不能换目标或正文复用。超时或 `unknown` 时保留原 ID，先查账本并核对客户端，不换新 ID 盲目补发。当前只支持文字，没有图片、文件、语音、群聊或群发。
+请求 ID 为 1–128 位 ASCII，首位是字母或数字，其余可含 `._:-`，规范成小写。本机账本在调用前保留请求，同一 ID 不会再次发送，也不能换目标、正文或图片内容复用。超时或 `unknown` 时保留原 ID，先查账本并核对客户端，不换新 ID 盲目补发。保存图片与表情包见 [媒体说明](media.md)。暂不支持普通文件、语音、群聊或群发；`--image` 提交图片消息，不提供收藏表情包发送入口。
 
 ### `send-status` — 查询发送请求记录
 
@@ -1048,10 +1097,10 @@ REPL 支持单、双引号，Windows 路径的反斜杠保持原样；双引号�
 
 | 命令 | 默认 | 当前范围 |
 | --- | --- | --- |
-| `start`、`account`、`accounts`、`ids`、`history` | `reverse-native` | 当前账号、已加载联系人、最近个人会话历史 |
+| `start`、`account`、`accounts`、`ids`、`history`、`media` | `reverse-native` | 当前账号、已加载联系人、最近个人会话历史及媒体归档 |
 | `record import --to` | `reverse-native` | 使用对应历史后端读取并保存副本 |
 | `record import --input`、`record list/show/edit/changes/undo/export` | 无需连接后端 | 本地副本操作 |
-| `configure-target`、`send`、`send-status`、`decrypt`、`db` | `reverse-native` | 本机单目标文字发送、账本及独立数据库模块 |
+| `configure-target`、`send`、`send-status`、`decrypt`、`db` | `reverse-native` | 本机单目标文字/图片发送、账本及独立数据库模块 |
 | `doctor`、`status`、`inspect` | `weflow-http` | 原生检查加 `--backend reverse-native` |
 | `list`、`contacts`、`watch` | `weflow-http` | 另行配置的读取后端；原生暂不支持 |
 | `help`、`exit`、`quit` | 无需后端 | 帮助或交互控制 |
@@ -1059,7 +1108,7 @@ REPL 支持单、双引号，Windows 路径的反斜杠保持原样；双引号�
 
 `weflow-http` 访问自己部署的本机 API；`weflow-native` 使用兼容 WCDB 资源和自己的密钥；`cache` 只读取 WXcc 曾保存的消息，支持已有缓存的 `list` / `history`，要求 `--self`。这些历史目标不自动解析原生 `u_` 编号，需使用对应后端的完整会话 ID。
 
-原生功能只支持已适配且 DLL 指纹匹配的版本。目前没有原生全量通讯录、会话列表、新消息监听、历史分页或媒体发送。实现和验证边界见 [native-read.md](native-read.md) 与 [native-send.md](native-send.md)。
+原生功能只支持已适配且 DLL 指纹匹配的版本。目前没有原生全量通讯录、会话列表、新消息监听或历史分页。图片发送需要独立入口校验与运行验证，实现和验证边界见 [native-read.md](native-read.md)、[native-send.md](native-send.md) 与 [media.md](media.md)。
 
 ## 编号怎么用
 

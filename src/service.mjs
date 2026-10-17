@@ -8,6 +8,8 @@ import { readNativeContent } from './native-content.mjs';
 import { CaptureStore } from './store.mjs';
 import { WxError } from './errors.mjs';
 import { NativeSendAdapter } from './native-send-adapter.mjs';
+import { describeMessageMedia, saveMessageMedia, decodeMediaBytes } from './media.mjs';
+import { findMediaRoot } from './media-roots.mjs';
 
 const BACKENDS = new Set(['weflow-http', 'weflow-native', 'cache', 'reverse-native']);
 
@@ -45,6 +47,7 @@ function nativeMessage(row, to, self) {
     createTime: row.create_time ?? row.createTime,
     isSend: direction,
     senderUsername,
+    rawContent: row.rawXml ?? row.rawContent,
     content: typeof row.content === 'string' ? row.content : typeof row.rawContent === 'string' && row.message_content === undefined && row.compress_content === undefined ? row.rawContent : readNativeContent(row),
   }, to, self, { source: 'weflow-native' });
 }
@@ -87,6 +90,49 @@ export async function createService(options = {}, dependencies = {}) {
     return adapter;
   };
   const openNative = async () => { const native = adapterFor(); await native.open(); return native; };
+
+  async function mediaResult(result, args = {}, force = false) {
+    if (!Array.isArray(result?.messages)) return result;
+    const messages = result.messages.map(message => {
+      const media = describeMessageMedia(message);
+      return media.length ? { ...message, media } : message;
+    });
+    if (!force && !args.output && !messages.some(message => message.media?.length)) return result;
+    const scope = createHash('sha256').update(JSON.stringify([result.self ?? options.self ?? backend, result.chatId ?? args.to])).digest('hex').slice(0, 24);
+    const mediaRoot = args.mediaRoot ?? await (dependencies.findMediaRoot ?? findMediaRoot)(result.self ?? options.self, options);
+    const md5s = messages.flatMap(message => message.media ?? []).map(media => media.md5).filter(Boolean);
+    let hardlinks, decoder;
+    const warnings = [];
+    const verifiedNative = backend === 'reverse-native' && typeof result.self === 'string' && Number.isSafeInteger(result.pid) && typeof result.generation === 'string';
+    if (verifiedNative && md5s.length && mediaRoot) {
+      try {
+        const prepare = dependencies.prepareMediaHardlinks ?? (await import('./media-hardlinks.mjs')).prepareMediaHardlinks;
+        hardlinks = await prepare({ self: result.self, pid: result.pid, generation: result.generation, bindingRevision: result.bindingRevision, options, mediaRoot, md5s });
+      } catch (error) {
+        if (['E_ACCOUNT_CHANGED', 'E_DB_ACCOUNT_CHANGED'].includes(error.code)) throw error;
+        warnings.push({ code: error.code ?? 'E_MEDIA_HARDLINKS', message: error.message });
+      }
+    }
+    try {
+      if (verifiedNative && md5s.length) {
+        const createDecoder = dependencies.createMediaDecoder ?? (await import('./media-v4.mjs')).createV4MediaDecoder;
+        decoder = createDecoder({ self: result.self, pid: result.pid, guard: async () => {
+          const current = await adapterFor().account();
+          return current.self === result.self && current.pid === result.pid && current.generation === result.generation && current.bindingRevision === result.bindingRevision && current.accountVerified === true;
+        } }, { fallback: decodeMediaBytes });
+      }
+      const saved = await (dependencies.saveMessageMedia ?? saveMessageMedia)(messages, {
+        output: args.output ?? resolve('data', 'media', scope), mediaRoot,
+        ...(hardlinks ? { resolveLocalPaths: hardlinks.resolveLocalPaths } : {}),
+        ...(decoder ? { decodeMedia: decoder.decodeMedia } : {}),
+      });
+      if (verifiedNative) {
+        const current = await adapterFor().account();
+        if (current.self !== result.self || current.pid !== result.pid || current.generation !== result.generation || current.bindingRevision !== result.bindingRevision) throw new WxError('E_ACCOUNT_CHANGED', '媒体归档期间账号或运行代次已变化；请重新连接并核对账号。');
+      }
+      return { ...result, messages, media: { ...saved, ...(warnings.length ? { warnings } : {}) } };
+    } finally { decoder?.dispose?.(); }
+  }
 
   async function watchNative({ signal, to, onEvent }) {
     if (!options.self) throw new WxError('E_SELF_REQUIRED', '原生 watch 需要 --self <本人 wxid>，用于确认消息方向。');
@@ -203,12 +249,19 @@ export async function createService(options = {}, dependencies = {}) {
       return { source: result.source, contacts: result.rows };
     },
     async history(args) {
-      if (backend === 'reverse-native') return adapterFor().history(args);
-      if (backend === 'cache') { await loadStore(); return { source: 'captured-events', messages: store.index.history(args) }; }
-      if (backend === 'weflow-http') return adapterFor().history(args);
+      const { output: _output, mediaRoot: _mediaRoot, ...query } = args;
+      if (backend === 'reverse-native') return mediaResult(await adapterFor().history(query), args);
+      if (backend === 'cache') { await loadStore(); return mediaResult({ source: 'captured-events', messages: store.index.history(query) }, args); }
+      if (backend === 'weflow-http') return mediaResult(await adapterFor().history(query), args);
       requirePrivateTarget(args.to);
-      const result = await (await openNative()).getMessages(args);
-      return { source: result.source, messages: result.rows.map(row => nativeMessage(row, args.to, options.self)).sort((a, b) => a.timestamp - b.timestamp) };
+      const result = await (await openNative()).getMessages(query);
+      return mediaResult({ source: result.source, messages: result.rows.map(row => nativeMessage(row, args.to, options.self)).sort((a, b) => a.timestamp - b.timestamp) }, args);
+    },
+    async media(args) {
+      const result = await this.history(args);
+      const enriched = result.media ? result : await mediaResult(result, args, true);
+      const { messages: _messages, ...summary } = enriched;
+      return summary;
     },
     async watch(args) {
       if (backend === 'reverse-native') throw new WxError('E_UNSUPPORTED', '逆向发送后端尚未提供消息监听；使用读取后端。');
@@ -219,8 +272,9 @@ export async function createService(options = {}, dependencies = {}) {
       await loadStore();
       const onEvent = async message => {
         if (message.chatId !== args.to) throw new WxError('E_CHAT_SCOPE', '拒绝保存目标会话以外的消息。');
-        const captured = await store.append(message);
-        if (captured) await args.onEvent?.({ ...captured, source: message.source });
+        const enriched = await mediaResult({ messages: [message] }, args);
+        const captured = await store.append(enriched.messages[0]);
+        if (captured) await args.onEvent?.({ ...captured, source: message.source, ...(enriched.media ? { mediaFiles: enriched.media } : {}) });
       };
       try {
         if (backend === 'weflow-http') await adapterFor().watch({ ...args, onEvent });

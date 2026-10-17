@@ -25,6 +25,13 @@ test('read missing registry is empty and creates no private files', async t => {
   assert.deepEqual(await readdir(fx.directory), []);
   assert.throws(() => fx.registry.resolve(recipientAlias(id)), { code: 'E_RECIPIENT_UNKNOWN' });
 });
+test('file transfer assistant has a stable exact ID registration without granting send permission', async t => {
+  const fx = await fixture(t);
+  const displayName = '文件传输助手';
+  await fx.registry.register({ id: 'filehelper', displayName });
+  assert.equal(fx.registry.resolve(recipientAlias('filehelper')), 'filehelper');
+  assert.deepEqual(fx.registry.list(), [{ alias: recipientAlias('filehelper'), displayName }]);
+});
 test('atomic registration persists privately but default public methods contain only alias and full name', async t => {
   const fx = await fixture(t);
   const displayName = '完整姓名 👩‍💻 / 测试联系人';

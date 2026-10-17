@@ -4,10 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { callPersistentHost } from './native-runtime-client.mjs';
 import { RecipientRegistry, recipientAlias } from './recipient-registry.mjs';
 import { WxError } from './errors.mjs';
+import { describeMessageMedia } from './media.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
-export const NATIVE_READ_SCRIPT = 'readnative_live4';
+export const NATIVE_READ_SCRIPT = 'readnative_live5';
 export const LEGACY_NATIVE_READ_SCRIPTS = Object.freeze([
+  Object.freeze({ name: 'readnative_live4', sourceSha256: 'aee0450cfb3816239adab1956d331e04665f66136675937eef220919c334f4b8' }),
   Object.freeze({ name: 'readnative_live3', sourceSha256: '44b0270432f8e695d579ba0d00af8334cd0cb1a0df410ffbb492645ad307513e' }),
 ]);
 const isGeneration = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
@@ -43,13 +45,16 @@ function requireAccount(result, runtime) {
 }
 
 function normalizeHistoryMessage(row, { self, chatId }) {
-  if (!row || !isIntegerToken(row.serverId) || !isIntegerToken(row.type) || !isIntegerToken(row.createTime) || typeof row.content !== 'string' || row.content.length > 1024 * 1024 || !row.content.isWellFormed() || typeof row.senderUsername !== 'string' || (row.senderUsername && !isId(row.senderUsername)) || (row.senderName !== undefined && !isName(row.senderName)) || (row.subType !== undefined && !isIntegerToken(row.subType))) throw error('E_NATIVE_HISTORY_SCHEMA', '原生历史消息字段尚未通过严格结构校验。');
+  if (!row || !isIntegerToken(row.serverId) || !isIntegerToken(row.type) || !isIntegerToken(row.createTime) || typeof row.content !== 'string' || row.content.length > 1024 * 1024 || !row.content.isWellFormed() || (row.rawXml !== undefined && (typeof row.rawXml !== 'string' || row.rawXml.length > 1024 * 1024 || !row.rawXml.isWellFormed())) || typeof row.senderUsername !== 'string' || (row.senderUsername && !isId(row.senderUsername)) || (row.senderName !== undefined && !isName(row.senderName)) || (row.subType !== undefined && !isIntegerToken(row.subType))) throw error('E_NATIVE_HISTORY_SCHEMA', '原生历史消息字段尚未通过严格结构校验。');
   const milliseconds = BigInt(row.createTime) * 1000n;
   if (milliseconds > BigInt(Number.MAX_SAFE_INTEGER)) throw error('E_NATIVE_HISTORY_SCHEMA', '消息时间超出可精确表示的毫秒范围。');
+  const media = describeMessageMedia({ ...row, text: row.content });
   return {
     serverId: row.serverId, createTime: row.createTime, content: row.content, senderUsername: row.senderUsername,
     ...(row.senderName === undefined ? {} : { senderName: row.senderName }),
     ...(row.subType === undefined ? {} : { subType: row.subType }),
+    ...(row.rawXml === undefined ? {} : { rawXml: row.rawXml }),
+    ...(media.length ? { media } : {}),
     id: row.serverId, chatId, senderId: row.senderUsername || null,
     isSelf: row.senderUsername ? row.senderUsername === self : null,
     type: row.type, text: row.content, timestamp: Number(milliseconds), source: 'reverse-native',

@@ -10,6 +10,7 @@
 | 获取数据库 key 或导出明文副本 | [4. 一键解密](#database-copy) | 对应库的已认证 key；可选明文副本 |
 | 不连接微信，练习编辑 | [5. 完全离线演示](#offline-demo) | 使用虚构消息完成一次本地编辑 |
 | 从自己的程序调用 WXcc | [6. Node.js 集成](#node-integration) | 参数数组调用和 JSON 结果 |
+| 保存图片或表情包，或用文件助手测试图片发送 | [7. 媒体保存与测试](#save-media) | 指定目录、本机画廊链接和单次图片发送回执 |
 
 主流程使用 **PowerShell**，终端停在 WXcc 程序目录。命令返回 JSON；示例中保存到 `$targetAlias`、`$copyId` 等变量的是你本机的真实结果。按步骤在**同一个 PowerShell 终端**执行，遇到报错先停下，不跳过检查。换了终端、微信账号或主进程后，重新获取所需结果，不猜编号或沿用旧状态。
 
@@ -82,9 +83,9 @@ $targetAlias = Read-Host "粘贴你明确选择的完整 u_ 编号"
 if ($LASTEXITCODE -ne 0) { throw "历史读取失败" }
 ```
 
-在 `messages` 中看每条消息：`text` 是正文，`timestamp` 是毫秒时间；`isSelf:true` 表示自己发的，`false` 表示对方，`null` 表示暂时不知道发言人。没有消息时，先确认目标聊天确有历史，再按错误提示或重新选目标处理。
+在 `messages` 中看每条消息：`text` 是正文，`timestamp` 是毫秒时间；`isSelf:true` 表示自己发的，`false` 表示对方，`null` 表示暂时不知道发言人。`messages[].media[].kind` 用 `image` / `sticker` 区分图片与表情包；发现媒体时会尝试保存，在返回的 `media.indexUrl` 打开本机画廊。没有消息时，先确认目标聊天确有历史，再按错误提示或重新选目标处理。
 
-到这里已经完成读取，不需要先解密数据库。想修改一份本地副本，继续下一个流程；`$targetAlias` 继续使用刚才选定的真实编号。
+到这里已经完成读取，不需要先解密数据库。想修改一份本地副本，继续下一个流程；`$targetAlias` 继续使用刚才选定的真实编号。要自选媒体保存目录或只查看媒体摘要，见 [流程 7](#save-media)。
 
 <a id="edit-local-copy"></a>
 ## 2. 修改一份本地聊天副本，再撤销
@@ -456,6 +457,72 @@ node .\read-chat.mjs (Read-Host "输入 WXcc 程序文件夹的完整路径") (R
 消息 `serverId` 等 64 位 ID 保留字符串，不转为 Number 或 `[double]`；`"0"` 可能重复，不能直接当唯一键。`isSelf:null` 表示未知，不应按“不是 true 就是对方”来判断。原生历史返回的 `schemaValidated:true`、`historyAvailable:true` 表示读取结构和能力已通过检查。
 
 调用超时不代表底层任务已取消，尤其不能把读取脚本的重试思路套到发送上。需要发送集成时，先在私有状态文件持久保存 request ID，失败后用原 ID 查 `send-status`，不自动重发。
+
+<a id="save-media"></a>
+## 7. 保存图片和表情包，用文件助手测试图片发送
+
+### 第一步：保存最近聊天中的媒体
+
+先按流程 1 完成读取准备并确认当前账号。下面使用文件助手的固定 ID `filehelper`；保存其他个人聊天时，换成自己明确选择的实际 `u_` 编号。
+
+```powershell
+$mediaOutput = Read-Host "输入图片和表情包的保存目录完整路径"
+if (-not [IO.Path]::IsPathRooted($mediaOutput)) { throw "请使用完整路径" }
+$rawMedia = .\wxcc.cmd media --to filehelper --limit 30 --output $mediaOutput --json
+if ($LASTEXITCODE -ne 0) { throw "媒体读取或归档失败，先处理错误" }
+$media = $rawMedia | ConvertFrom-Json
+$media.media | Select-Object directory, indexPath, indexUrl, manifestPath, saved, unavailable, total
+```
+
+在结果的 `indexPath` 或 `indexUrl` 打开 `wxcc-media-index.html`，查看已取得的图片和表情包。`wxcc-media-manifest.json` 保存条目清单；`media.items[].filePath` / `fileUrl` 给出每个已保存文件的位置，CLI 展示可能脱敏，以画廊中的文件链接为准。查看链接为本机 `file:` 链接，没有上传到网站。
+
+`--limit 30` 指最近 30 条消息，可能没有图片。`unavailable` 表示已识别媒体但尚未取得文件，可查看原因：
+
+```powershell
+$media.media.items | Where-Object status -eq "unavailable" | Select-Object kind, reasonCode, reason
+```
+
+默认只查当前账号媒体缓存；自动发现失败时，指定当前账号实际缓存根目录重新归档：
+
+```powershell
+$mediaSource = Read-Host "输入当前微信账号实际媒体缓存根目录"
+.\wxcc.cmd media --to filehelper --limit 30 --output $mediaOutput --media-root $mediaSource --json
+if ($LASTEXITCODE -ne 0) { throw "媒体归档失败，先处理错误" }
+```
+
+`--media-root` 是来源，`--output` 是保存目的地。重复运行会保留同一输出目录此前的归档，`saved` / `unavailable` / `total` 是整个归档的计数。要同时查看聊天正文，用 `history --to filehelper --limit 30 --output $mediaOutput --json`。
+
+### 第二步：配置文件助手并准备图片发送
+
+首次图片运行验证仅允许文件助手。先核对并配置这个明确目标，再按 [流程 3 的第一至三步](#prepare-send) 查询主 PID、另开终端启动发送宿主，并检查 `send.ready:true` 和该目标的 `canSend:true`：
+
+```powershell
+.\wxcc.cmd ids --keyword filehelper --json
+if ($LASTEXITCODE -ne 0) { throw "文件助手查询失败" }
+.\wxcc.cmd configure-target --to filehelper --json
+if ($LASTEXITCODE -ne 0) { throw "文件助手配置失败" }
+```
+
+在流程 3 中使用文件助手的实际编号作为 `$targetAlias`，联系人关键词使用 `filehelper`。如果之前的发送宿主绑定了其他目标，需按 [原生发送说明](native-send.md) 为文件助手准备新的发送绑定，不能沿用其他目标的 `canSend` 结果。
+
+### 第三步：实际发送一张本地图片，再回读保存
+
+下面会实际向文件助手提交一张图片。图片须为 1 字节至 25 MiB 的本机普通文件，支持 PNG、JPEG、GIF、WebP 和 BMP；网址和网络共享路径不可用。不要同时指定 `--text`。
+
+```powershell
+$testImage = Read-Host "输入要发送的本地测试图片路径"
+$imageRequestId = "image-" + [guid]::NewGuid().ToString("D")
+Write-Host "请保留本次图片请求 ID：$imageRequestId"
+.\wxcc.cmd send --to filehelper --image $testImage --request-id $imageRequestId --json
+```
+
+无论正常返回还是超时，都先用原请求 ID 查询：
+
+```powershell
+.\wxcc.cmd send-status --request-id $imageRequestId --json
+```
+
+`accepted` 只说明客户端内部接受提交。核对微信文件助手中的图片后，再运行第一步的 `media` 命令，打开画廊查看保存结果。`unknown`、超时或账本未知时，保留原 ID 并核对客户端，不自动换新 ID 重发；同一 ID 不能换目标、正文或图片内容复用。`--image` 发送图片消息，不是发送收藏表情包的专用入口。更多媒体来源和验证限制见 [媒体说明](media.md)。
 
 <a id="other-terminals"></a>
 ## 其他终端、失败恢复与分享

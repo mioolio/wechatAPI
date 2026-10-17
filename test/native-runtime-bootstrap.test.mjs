@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { bootstrapNativeSend, hasPriorNativeValidation, hasPriorContactValidation } from '../src/native-runtime-bootstrap.mjs';
+import { bootstrapNativeSend, hasPriorNativeValidation, hasPriorNativeImageValidation, hasPriorContactValidation } from '../src/native-runtime-bootstrap.mjs';
 import { NATIVE_SEND_SCRIPT } from '../src/native-send-adapter.mjs';
 
 const generation = '85bb4adf-6aee-40a9-b3df-12059c29b7b5';
@@ -34,7 +34,7 @@ function fixture(changes = {}) {
       }
       assert.equal(request.args.method, 'prepare');
       const config = request.args.params[0];
-      runtime = { ...runtime, ...config, ready: true, sendValidated: config.validatedBinarySha256 === sha, ...changes.prepared };
+      runtime = { ...runtime, ...config, ready: true, sendValidated: config.validatedBinarySha256 === sha, imageSendValidated: config.validatedImageBinarySha256 === sha, imageProloguesVerified: true, imageValidationAllowed: config.allowImageValidation === true, ...changes.prepared };
       return { success: true, result: runtime };
     },
   };
@@ -74,7 +74,7 @@ test('mismatched/incomplete evidence cannot unlock sending', () => {
     assert.equal(hasPriorNativeValidation({ ...fx.profile, nativeSendValidation: record }, fx.host), false);
   }
 });
-test('a valid already bound live3 agent is reused without load, prepare, unload or detach', async () => {
+test('a valid already bound agent is reused without load, prepare, unload or detach', async () => {
   const fx = fixture({ profile: { nativeSendValidation: evidence }, host: { scripts: [{ name: NATIVE_SEND_SCRIPT, loaded: true, destroyed: false, sourceSha256: sourceSha }] }, runtime: { generation, chatId: id, sessionId: id, displayName: '合成联系人', ready: true, sendValidated: true } });
   const result = await bootstrapNativeSend(fx.options, fx.deps);
   assert.equal(result.ready, true);
@@ -239,4 +239,68 @@ test('an already validated agent cannot replace missing binary validation eviden
   assert.equal(result.ready, false);
   assert.equal(result.priorBinaryValidation, false);
   assert.equal(Object.hasOwn(fx.saves[0].binding, 'validatedBinarySha256'), false);
+});
+
+const imageEvidence = { ...evidence, entryRva: '0x2ba7a20', requestId: 'synthetic-image-evidence' };
+test('recorded image validation requires its own exact binary, version, native entry and accepted evidence', () => {
+  const fx = fixture({ profile: { nativeImageSendValidation: imageEvidence } });
+  assert.equal(hasPriorNativeImageValidation(fx.profile, fx.host), true);
+  assert.equal(hasPriorNativeImageValidation({ ...fx.profile, dllSha256: sha.toUpperCase(), nativeImageSendValidation: { ...imageEvidence, dllSha256: sha.toUpperCase() } }, fx.host), true);
+  for (const record of [
+    undefined, null, evidence,
+    { ...imageEvidence, dllSha256: 'b'.repeat(64) }, { ...imageEvidence, version: '4.1.15.12' },
+    { ...imageEvidence, entryRva: '0x2ba7a21' }, { ...imageEvidence, entryRva: undefined },
+    { ...imageEvidence, status: 'unknown' }, { ...imageEvidence, status: 'failed' },
+    { ...imageEvidence, nativeEntryCalled: false }, { ...imageEvidence, nativeEntryCalled: 'true' },
+    { ...imageEvidence, verifiedAt: 'bad date' }, { ...imageEvidence, verifiedAt: undefined },
+    { ...imageEvidence, requestId: 'invalid id' }, { ...imageEvidence, requestId: 123 },
+  ]) assert.equal(hasPriorNativeImageValidation({ ...fx.profile, nativeImageSendValidation: record }, fx.host), false);
+  assert.equal(hasPriorNativeImageValidation({ ...fx.profile, version: '4.1.15.12' }, fx.host), false);
+  assert.equal(hasPriorNativeImageValidation({ ...fx.profile, dllSha256: 'b'.repeat(64) }, fx.host), false);
+  assert.equal(hasPriorNativeImageValidation(fx.profile, { ...fx.host, dllSha256: undefined }), false);
+});
+
+test('valid image evidence restores image capability independently and never sends during bootstrap', async () => {
+  const fx = fixture({ profile: { nativeSendValidation: evidence, nativeImageSendValidation: imageEvidence } });
+  const result = await bootstrapNativeSend(fx.options, fx.deps);
+  assert.equal(result.ready, true);
+  assert.equal(result.imageSendAvailable, true);
+  assert.equal(result.imageSendValidated, true);
+  assert.equal(result.priorImageValidation, true);
+  const config = fx.calls.find(call => call.args?.method === 'prepare').args.params[0];
+  assert.equal(config.validatedImageBinarySha256, sha);
+  assert.equal(config.allowImageValidation, undefined);
+  assert.equal(fx.calls.some(call => ['sendText', 'prepareImage', 'sendImage'].includes(call.args?.method)), false);
+});
+
+test('missing image evidence does not borrow text validation, and first validation is limited to filehelper', async () => {
+  const ordinary = fixture({ profile: { nativeSendValidation: evidence } });
+  const result = await bootstrapNativeSend(ordinary.options, ordinary.deps);
+  assert.equal(result.ready, true);
+  assert.equal(result.imageSendAvailable, false);
+  assert.equal(result.priorImageValidation, false);
+  const ordinaryConfig = ordinary.calls.find(call => call.args?.method === 'prepare').args.params[0];
+  assert.equal(ordinaryConfig.allowImageValidation, undefined);
+  assert.equal(ordinaryConfig.validatedImageBinarySha256, undefined);
+  const helper = fixture({ target: { chatId: 'filehelper' }, profile: { nativeSendValidation: evidence } });
+  const helperResult = await bootstrapNativeSend(helper.options, helper.deps);
+  const helperConfig = helper.calls.find(call => call.args?.method === 'prepare').args.params[0];
+  assert.equal(helperConfig.allowImageValidation, true);
+  assert.equal(helperConfig.validatedImageBinarySha256, undefined);
+  assert.equal(helperResult.imageSendAvailable, false);
+  assert.equal(helper.calls.some(call => ['sendText', 'prepareImage', 'sendImage'].includes(call.args?.method)), false);
+});
+
+test('restored image evidence never reports sending available while the common native send gate is closed', async () => {
+  for (const changes of [
+    { profile: { nativeImageSendValidation: imageEvidence } },
+    { profile: { nativeSendValidation: evidence, nativeImageSendValidation: imageEvidence }, prepared: { sendValidated: false } },
+    { profile: { nativeSendValidation: evidence, nativeImageSendValidation: imageEvidence }, prepared: { imageProloguesVerified: false } },
+  ]) {
+    const fx = fixture(changes);
+    const result = await bootstrapNativeSend(fx.options, fx.deps);
+    assert.equal(result.imageSendValidated, true);
+    assert.equal(result.imageSendAvailable, false);
+    assert.equal(fx.calls.some(call => ['sendText', 'prepareImage', 'sendImage'].includes(call.args?.method)), false);
+  }
 });

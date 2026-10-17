@@ -101,7 +101,7 @@ test('history normalizes large server IDs, seconds, types and the source', async
   assert.deepEqual(await adapter.history({ to: TO }), {
     source: 'weflow-http', messages: [
       { id: '9007199254740993', chatId: TO, senderId: TO, isSelf: false, type: 'text', text: '正文', timestamp: 100000, source: 'weflow-http' },
-      { id: '9007199254740994', chatId: TO, senderId: TO, isSelf: false, type: 'image', text: '正文', timestamp: 101000, source: 'weflow-http' },
+      { id: '9007199254740994', chatId: TO, senderId: TO, isSelf: false, type: 'image', text: '正文', timestamp: 101000, media: [{ kind: 'image', urls: [], localPaths: [] }], source: 'weflow-http' },
     ],
   });
 });

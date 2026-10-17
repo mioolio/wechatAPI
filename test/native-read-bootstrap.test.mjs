@@ -217,6 +217,20 @@ test('an empty verified self history still proves the completed ABI without fabr
   assert.equal((await bootstrapNativeRead(fx.options, fx.dependencies)).historyAvailable, true);
 });
 
+test('bootstrap accepts bounded optional XML and rejects malformed XML fields before granting capability', async () => {
+  const row = { serverId: '1', type: '3', createTime: '1790908800', content: 'image', senderUsername: self };
+  for (const rawXml of [undefined, '', '<msg><img md5="00000000000000000000000000000000" /></msg>', '图'.repeat(87381)]) {
+    const fx = fixture({ history: { messages: [{ ...row, ...(rawXml === undefined ? {} : { rawXml }) }] } });
+    assert.equal((await bootstrapNativeRead(fx.options, fx.dependencies)).historyAvailable, true);
+  }
+  for (const rawXml of [null, 123, {}, '\ud800', 'before\0after', 'x'.repeat(262145), '图'.repeat(87382)]) {
+    const fx = fixture({ history: { messages: [{ ...row, rawXml }] } });
+    await assert.rejects(bootstrapNativeRead(fx.options, fx.dependencies), { code: 'E_NATIVE_HISTORY_SCHEMA' });
+    assert.equal(queried(fx.calls), true);
+    assert.deepEqual(operations(fx.calls).at(-1), ['rpc', 'history']);
+  }
+});
+
 test('host failures are not retried or followed by script cleanup', async () => {
   const fx = fixture({ call: async () => ({ success: false, error: { code: 'E_TIMEOUT_UNKNOWN', message: 'Mock timeout.' } }) });
   await assert.rejects(bootstrapNativeRead(fx.options, fx.dependencies), { code: 'E_TIMEOUT_UNKNOWN' });

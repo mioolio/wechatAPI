@@ -135,7 +135,7 @@ function readRealm(options = {}) {
         assert.ok(typed.add(8).readPointer().equals(typed.readPointer().add(32)));
         assert.ok(typed.add(16).readPointer().equals(typed.add(8).readPointer()));
         assert.equal(typed.add(0x48).readS32(), realm.input.limit);
-        assert.equal(typed.add(0x54).readU8(), 0, 'raw XML stays disabled');
+        assert.equal(typed.add(0x54).readU8(), 1, 'source XML is requested for media metadata');
         assert.equal(correlation.readUtf8String(), 'wxcc-read-1');
         const owner = handle.readPointer();
         owner.add(8).readPointer()(owner, realm.result);
@@ -162,7 +162,8 @@ function readRealm(options = {}) {
       writeString(p.add(0x28), message.content ?? content); p.add(0x48).writeU8(1);
       writeString(p.add(0x50), message.senderUsername ?? 'wxid_synthetic_sender');
       writeString(p.add(0x70), message.senderName ?? '完整姓名 👩‍💻'); p.add(0x90).writeU8(1);
-      p.add(0xb8).writeU8(0);
+      if (message.rawXml !== undefined) { writeString(p.add(0x98), message.rawXml); p.add(0xb8).writeU8(1); }
+      else p.add(0xb8).writeU8(0);
       return p;
     });
     Object.assign(realm, { result, group, rows, messagePointers, input: { to, limit: Math.max(1, messages.length) } });
@@ -210,15 +211,26 @@ for (const [description, mutate, pattern] of invalidVectors) test(`native histor
   const r = readRealm().fixture(); mutate(r); assert.throws(() => r.decode(), pattern);
 });
 
-test('native history rejects invalid optional flags and unexpected XML', () => {
+test('native history rejects invalid optional flags', () => {
   for (const offset of [0x18, 0x48, 0x90, 0xb8]) {
     const r = readRealm().fixture(); r.messagePointers[0].add(offset).writeU8(2);
     assert.throws(() => r.decode(), /E_HISTORY_FLAG/);
   }
   const success = readRealm().fixture(); success.result.writeU8(2);
   assert.throws(() => success.decode(), /E_HISTORY_FLAG/);
-  const xml = readRealm().fixture(); xml.messagePointers[0].add(0xb8).writeU8(1);
-  assert.throws(() => xml.decode(), /E_HISTORY_XML_UNEXPECTED/);
+});
+
+test('native history copies optional source XML with the same bounded string validation and byte budget', () => {
+  const rawXml = '<msg><emoji md5="synthetic" cdnurl="https://example.invalid/test.gif" /></msg>';
+  const valid = readRealm().fixture({ messages: [{ rawXml }] });
+  assert.equal(valid.decode().messages[0].rawXml, rawXml);
+  const invalid = readRealm().fixture({ messages: [{ rawXml: 'hello' }] });
+  invalid.messagePointers[0].add(0x98 + 16).writeU64(262145);
+  assert.throws(() => invalid.decode(), /E_STRING_LAYOUT:raw-xml/);
+  const nul = readRealm().fixture({ messages: [{ rawXml: 'before\0after' }] });
+  assert.throws(() => nul.decode(), /E_STRING_ENCODING:raw-xml/);
+  const tooLarge = readRealm().fixture({ messages: Array.from({ length: 4 }, () => ({ rawXml: 'x'.repeat(200000) })) });
+  assert.throws(() => tooLarge.decode(), /E_HISTORY_BYTE_LIMIT/);
 });
 
 test('native history rejects malformed string lengths, capacities and inline layout', () => {
