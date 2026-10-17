@@ -244,6 +244,8 @@ Write-Host "请保留本次请求 ID：$requestId"
 <a id="database-copy"></a>
 ## 4. 一键获取 key，需要时再导出副本
 
+自动取钥与完整解密导出均已实现，并已在适配版本上通过真机验证。下面先演示仅取钥模式，再演示完整导出；是否创建副本由 `--output` 决定。
+
 微信已打开并登录，在 WXcc 目录直接运行：
 
 ```powershell
@@ -282,7 +284,7 @@ if (@($databaseList.databases | Where-Object { $_.alias -eq $databaseAlias }).Co
 }
 ```
 
-想导出聊天正文，优先选 `role` 为 `message-history` 的主消息库。`session` 是会话列表，`contact` 是联系人；`search-index` 是搜索索引，不等同于主消息库。`binding:"pending-page-auth"` 只说明目录关系匹配，还没有用当前进程的密钥证明归属。
+想导出聊天正文，优先选 `role` 为 `message-history` 的主消息库。`session` 是会话列表，`contact` 是联系人；`search-index` 是搜索索引，不等同于主消息库。`db list` 的 `binding:"pending-page-auth"` 说明本次只做了目录发现；下一步自动取钥与页面认证后会返回对应的认证结果，这个发现阶段的标记不表示自动解密未实现。
 
 如果找不到自己的数据，先运行 `.\wxcc.cmd help db list`，按实际位置加 `--data-root`；多个同账号目录时加 `--account-dir`。重新执行列表和选择步骤，并在后续 `db decrypt` 使用同样的路径选项，不按“最近修改”猜目录。
 

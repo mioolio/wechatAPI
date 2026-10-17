@@ -696,6 +696,17 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 最近聊天直接用 `history`。`db` 用于发现当前账号数据库，或把一个加密库导出成独立明文 SQLite 副本以便离线分析；不修改实时库，也不自动把副本接入 `history`。
 
+**自动取钥与完整数据库解密导出均已实现并通过真机验证。** 当前支持 Windows 微信 4.1.15.13 x64 和匹配的 DLL 指纹。下表区分各命令实际执行到的阶段：
+
+| 用法 | 已实现的行为 | 成功结果 |
+| --- | --- | --- |
+| `db list` / `db status` | 只发现数据库并列出元数据，不执行解密 | `binding:"pending-page-auth"` 表示本次尚未执行页面认证 |
+| `decrypt` | 自动连接、识别账号与数据库、自动取钥并认证首页 | `keyAuthenticated:true` 和已认证的原始 AES key；按仅取钥模式不创建副本 |
+| `decrypt --output NEW_FILE` | 自动取钥、认证解密主库和已提交 WAL，再检查 SQLite 完整性 | `ok:true`、`quickCheck:"ok"`、完整明文副本及 key |
+| `db decrypt --database DB --output NEW_FILE` | 对明确选定的当前账号数据库执行自动取钥与完整解密导出 | `ok:true`、`quickCheck:"ok"`；需要显示 key 时加 `--show-key` |
+
+发现结果中的“待认证”、仅取钥模式不导出副本、解密副本未接入 `history`，分别说明操作阶段、所选模式和独立接口范围。这些字段或接口限制不表示自动解密功能尚未实现。
+
 <a id="decrypt"></a>
 ### `decrypt` — 一条命令取得当前账号的数据库 key
 
@@ -769,7 +780,7 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 | `directoryMatchVerified` | 目录名已匹配账号，不代表密钥归属已认证 |
 | `binding:"pending-page-auth"` | 仍待密钥和数据库页面认证 |
 
-结果不输出原文件名、账号绝对路径或密钥。此处 `accountVerified:false` / `cryptographicAccountVerified:false` 指数据库归属未完成认证，不是否定前面的本人账号。多个目录需明确选择，不按“最近修改”猜测。默认最多发现 512 个 `.db`，最多深入 4 层，跳过符号链接。
+结果不输出原文件名、账号绝对路径或密钥。此处 `accountVerified:false` / `cryptographicAccountVerified:false` 仅表示本次数据库发现未执行密钥与页面认证；它们不是功能开发状态，也不否定已验证的本人账号。执行自动解密并完成当前进程密钥与页面认证后，成功结果使用 `accountCryptographicBinding:true`、`binding:"current-process-page-auth"` 表示认证归属。多个目录需明确选择，不按“最近修改”猜测。默认最多发现 512 个 `.db`，最多深入 4 层，跳过符号链接。
 
 想导出聊天正文，优先选 `role:"message-history"`。`kind:"message"` 中也可能有搜索索引，所以不要只看 `kind`。
 
@@ -848,11 +859,13 @@ $mainPid = Read-Host "输入 doctor 中微信主进程的实际 pid"
 
 已在 **Windows 微信 4.1.15.13 x64** 通过正式 CLI 自动导出会话库、主消息库和联系人库，全部页面认证与 SQLite `quick_check` 均通过。使用这一流程无需准备固定密钥文件；换账号后重新识别当前账号和数据库。
 
+2026-10-18 再次核对：`decrypt` 在不创建数据库副本的情况下返回通过认证的 key；`decrypt --output` 自动导出 42 页数据库，返回 `ok:true`、`quickCheck:"ok"`，两种模式取得的 key 一致。自动取钥、解密导出和一键命令的相关 59 项测试全部通过。验证记录仅说明当次所选数据库及适配版本，不保证任意数据库格式均兼容。
+
 部分搜索索引库依赖微信专用分词器 `MMFtsTokenizer`。页面认证通过后，若 SQLite 完整性检查失败，且只读搜索检查确认缺少该分词器，会返回 `E_DB_SQLITE_TOKENIZER`，不发布副本。这表示当前 SQLite 无法完成该库的验证；不能据此判断密钥错误或数据库损坏。导出聊天正文优先选择 `role:"message-history"`。
 
 其他未识别的 SQLite 完整性检查失败仍返回 `E_DB_INTEGRITY`，也不发布副本。
 
-自动扫描默认 15 秒、最多读取 512 MiB 候选内存。只有当前进程候选认证并成功导出，才报告 `accountCryptographicBinding:true`、`binding:"current-process-page-auth"`。账号、PID 或本次后台运行标识变化会停止。
+自动扫描默认 15 秒、最多读取 512 MiB 候选内存。当前进程候选通过所选数据库的页面认证后，成功结果报告 `accountCryptographicBinding:true`、`binding:"current-process-page-auth"`；仅取钥模式无需创建副本，完整导出还须通过全部页面、已提交 WAL 和 SQLite `quick_check` 检查。账号、PID 或本次后台运行标识变化会停止。
 
 #### `db decrypt`：自己的密钥文件
 
