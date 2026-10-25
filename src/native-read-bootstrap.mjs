@@ -6,6 +6,7 @@ import { callPersistentHost } from './native-runtime-client.mjs';
 import { NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS, isNativeAccountChanged, requireContactSnapshot } from './native-read-adapter.mjs';
 import { createPrivacyFormatter } from './privacy.mjs';
 import { WxError } from './errors.mjs';
+import { nativeCompatibility } from './native-compat.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -53,9 +54,11 @@ export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = r
   const descriptor = await read(tokenFile);
   const host = await invoke('status', {});
   if (!descriptor || descriptor.host !== '127.0.0.1' || !Number.isInteger(descriptor.port) || descriptor.port < 1 || descriptor.port > 65535 || !isHash(descriptor.token) || !host || host.status !== 'ready' || host.attached !== true || host.verified !== true || !Number.isSafeInteger(host.pid) || host.pid < 1 || host.pid !== descriptor.pid || !UUID.test(host.generation ?? '') || host.generation !== descriptor.generation || !/^\d+\.\d+\.\d+\.\d+$/.test(host.version ?? '') || host.version !== descriptor.version || !sameHash(host.dllSha256, descriptor.dllSha256)) throw failure('E_NATIVE_READ_GENERATION', '读取宿主未就绪，或其地址、PID、代次、版本与哈希描述不一致。');
-  const profile = await read(profileFile ?? resolve(workspace, 'profiles', `${host.version}.json`));
+  const compatibility = nativeCompatibility(host.version);
+  if (!compatibility) throw failure('E_NATIVE_VERSION_UNSUPPORTED', '当前版本没有原生读取 agent。');
+  const profile = await read(profileFile ?? resolve(workspace, compatibility.profilePath));
   if (!profile || profile.version !== host.version || profile.architecture !== 'x64' || !sameHash(profile.dllSha256, host.dllSha256)) throw failure('E_NATIVE_READ_HASH', '当前版本 profile、x64 架构或 DLL SHA-256 与读取宿主不匹配。');
-  const source = await readAgent(resolve(workspace, 'agents/read-native.js'));
+  const source = await readAgent(resolve(workspace, compatibility.readAgent));
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > 1024 * 1024) throw failure('E_NATIVE_READ_SOURCE', '读取 agent 源码格式或大小无效。');
   const sourceSha256 = createHash('sha256').update(source, 'utf8').digest('hex');
   if (!Array.isArray(host.scripts)) throw failure('E_NATIVE_READ_SCRIPT_STATE', '宿主未提供可验证的已加载脚本列表。');
@@ -64,12 +67,12 @@ export async function bootstrapNativeRead({ workspace = WORKSPACE, tokenFile = r
   if (existing.length && !sameHash(existing[0].sourceSha256, sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '同名已加载脚本与当前 read-native.js 源哈希不一致；不会覆盖或卸载。');
   for (const script of host.scripts.filter(row => /^readnative_live\d+$/.test(row.name ?? '') && row.name !== NATIVE_READ_SCRIPT)) {
     const legacy = LEGACY_NATIVE_READ_SCRIPTS.find(row => row.name === script.name);
-    if (!legacy || script.loaded !== true || script.destroyed !== false || !sameHash(script.sourceSha256, legacy.sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '旧版读取脚本的来源或状态无法验证；保留现场，不会卸载或覆盖。');
+    if (!compatibility.allowLegacyReadScripts || !legacy || script.loaded !== true || script.destroyed !== false || !sameHash(script.sourceSha256, legacy.sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '旧版读取脚本的来源或状态无法验证；保留现场，不会卸载或覆盖。');
     const prior = await invoke('rpc', { name: script.name, method: 'inspect', params: [] });
     requireIdentity(prior, host);
     if (prior.generation !== host.generation) throw failure('E_NATIVE_READ_SCOPE', '旧版读取脚本不属于当前宿主代次；不会继续加载。');
   }
-  const agent = existing[0] ?? await invoke('load', { name: NATIVE_READ_SCRIPT, path: 'agents/read-native.js' });
+  const agent = existing[0] ?? await invoke('load', { name: NATIVE_READ_SCRIPT, path: compatibility.readAgent });
   if (!agent || agent.name !== NATIVE_READ_SCRIPT || agent.loaded !== true || agent.destroyed === true || !sameHash(agent.sourceSha256, sourceSha256)) throw failure('E_NATIVE_READ_SOURCE', '实际加载的读取脚本与当前源哈希或名称不匹配。');
   let runtime = await rpc('inspect');
   requireIdentity(runtime, host);

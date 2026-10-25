@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const source = await readFile(new URL('../agents/read-native.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../wechat-adapters/4.1.15.13/read-agent.js', import.meta.url), 'utf8');
 
 // Execute the production decoder against synthetic byte storage and VM ranges.
 // No Frida import, native process, hook, host request, or message send is involved.
@@ -106,7 +106,7 @@ function readRealm(options = {}) {
     setTimeout(callback, delay) { const id = Symbol('timer'); state.timers.set(id, { callback, delay }); return id; },
     clearTimeout: id => state.timers.delete(id),
   });
-  vm.runInContext(source, context, { filename: 'agents/read-native.js' });
+  vm.runInContext(source, context, { filename: 'wechat-adapters/4.1.15.13/read-agent.js' });
   vm.runInContext('binding = fixtureBinding;', context);
   context.verifyAccount = () => { state.events.push('verify-account'); };
   context.fn = (rva, ret, args) => {

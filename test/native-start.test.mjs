@@ -14,10 +14,11 @@ const sourceSha256 = createHash('sha256').update(source).digest('hex');
 
 async function fixture(changes = {}) {
   const workspace = await mkdtemp(join(tmpdir(), 'wxcc-native-start-'));
-  await mkdir(join(workspace, 'profiles'));
+  for (const version of new Set(['4.1.15.13', '4.2.0.7', changes.info?.version].filter(Boolean))) await mkdir(join(workspace, 'wechat-adapters', version), { recursive: true });
   await mkdir(join(workspace, 'agents'));
-  await writeFile(join(workspace, 'profiles/4.1.15.13.json'), JSON.stringify({ version: '4.1.15.13', architecture: 'x64', dllSha256: sha, ...changes.profile }));
-  await writeFile(join(workspace, 'agents/read-native.js'), source);
+  await writeFile(join(workspace, 'wechat-adapters', changes.info?.version ?? '4.1.15.13', 'profile.json'), JSON.stringify({ version: '4.1.15.13', architecture: 'x64', dllSha256: sha, ...changes.profile }));
+  await writeFile(join(workspace, 'wechat-adapters/4.1.15.13/read-agent.js'), source);
+  await writeFile(join(workspace, 'wechat-adapters/4.2.0.7/read-agent.js'), source);
   const tokenFile = join(workspace, 'data/native-read-host.json');
   const descriptor = { host: '127.0.0.1', port: 5001, token: 'b'.repeat(64), hostPid: 9999, pid: 1234, generation, version: '4.1.15.13', dllSha256: sha, ...changes.descriptor };
   const host = { pid: 1234, generation, version: '4.1.15.13', dllSha256: sha, status: 'ready', attached: true, verified: true, scripts: [{ name: NATIVE_READ_SCRIPT, loaded: true, destroyed: false, sourceSha256 }], ...changes.host };
@@ -53,7 +54,7 @@ test('one verified main process automatically starts one detached hidden read ho
     assert.equal(JSON.stringify(result).includes(fx.descriptor.token), false);
     const launch = fx.calls.find(row => row[0] === 'spawn')[1];
     assert.equal(launch.execPath, 'C:/mock/node.exe');
-    assert.deepEqual(launch.args, [join(fx.workspace, 'src/native-runtime-host.mjs'), '--pid', '1234', '--read', '--token-file', fx.tokenFile, '--profile', join(fx.workspace, 'profiles/4.1.15.13.json'), '--install-path', 'C:/mock/Weixin']);
+    assert.deepEqual(launch.args, [join(fx.workspace, 'src/native-runtime-host.mjs'), '--pid', '1234', '--read', '--token-file', fx.tokenFile, '--profile', join(fx.workspace, 'wechat-adapters/4.1.15.13/profile.json'), '--install-path', 'C:/mock/Weixin']);
     assert.equal(launch.options.detached, true); assert.equal(launch.options.windowsHide, true);
     assert.equal(launch.options.stdio[0], 'ignore'); assert.equal(Number.isInteger(launch.options.stdio[1]), true);
     assert.equal(launch.options.stdio[1], launch.options.stdio[2]);
@@ -70,6 +71,28 @@ test('a ready matching read host is bootstrapped and reused without another atta
     assert.equal(result.reused, true); assert.equal(count(fx, 'spawn'), 0); assert.equal(count(fx, 'bootstrap'), 1);
     assert.equal(JSON.parse(await readFile(fx.tokenFile, 'utf8')).generation, generation);
   } finally { await fx.cleanup(); }
+});
+
+test('4.2 startup selects its matching source and profile while preserving installation hash checks', async () => {
+  const version = '4.2.0.7';
+  const changes = { info: { version }, profile: { version }, descriptor: { version }, host: { version }, runtime: { version } };
+  const fx = await fixture(changes);
+  try {
+    const sources = [];
+    fx.dependencies.readSourceImpl = async path => { sources.push(path); return source; };
+    const result = await startNativeRead({ workspace: fx.workspace }, fx.dependencies);
+    assert.equal(result.version, version);
+    assert.equal(result.ready, true);
+    assert.deepEqual(sources, [join(fx.workspace, 'wechat-adapters/4.2.0.7/read-agent.js')]);
+    const launch = fx.calls.find(row => row[0] === 'spawn')[1];
+    assert.ok(launch.args.includes(join(fx.workspace, 'wechat-adapters/4.2.0.7/profile.json')));
+    assert.equal(launch.args.includes('--send'), false);
+  } finally { await fx.cleanup(); }
+  const mismatch = await fixture({ ...changes, profile: { version, dllSha256: 'c'.repeat(64) } });
+  try {
+    await assert.rejects(startNativeRead({ workspace: mismatch.workspace }, mismatch.dependencies), { code: 'E_NATIVE_HASH' });
+    assert.equal(count(mismatch, 'spawn'), 0);
+  } finally { await mismatch.cleanup(); }
 });
 
 test('unsupported platform, Node version, ABI version or DLL hash never launches a host', async () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const source = await readFile(new URL('../agents/send-native.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../wechat-adapters/4.1.15.13/send-agent.js', import.meta.url), 'utf8');
 
 // Model only pointer slots and the queue boundary. No Frida import or process access.
 function queueRealm({ enqueue, releaseJob } = {}) {
@@ -32,7 +32,7 @@ function queueRealm({ enqueue, releaseJob } = {}) {
     NativeCallback: function (callback) { return callback; },
     setTimeout: () => { throw Error('Unexpected timer in queue cancellation test'); },
   });
-  vm.runInContext(source, context, { filename: 'agents/send-native.js' });
+  vm.runInContext(source, context, { filename: 'wechat-adapters/4.1.15.13/send-agent.js' });
   const mainContext = allocate(16), runner = allocate(16);
   context.fn = rva => {
     if (rva === 0x45d10) return () => mainContext;

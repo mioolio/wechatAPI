@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const source = await readFile(new URL('../agents/send-native.js', import.meta.url), 'utf8');
+const source = await readFile(new URL('../wechat-adapters/4.1.15.13/send-agent.js', import.meta.url), 'utf8');
 function imageRealm({ nativeError, accepted = true, cleanupError } = {}) {
   const values = new Map(), calls = [], destructors = [];
   let next = 0x1000;

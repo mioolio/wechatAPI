@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const source = await readFile(new URL('../agents/receive.js', import.meta.url), 'utf8');
-const profile = JSON.parse(await readFile(new URL('../profiles/4.1.15.13.json', import.meta.url), 'utf8'));
+const source = await readFile(new URL('../wechat-adapters/4.1.15.13/receive-agent.js', import.meta.url), 'utf8');
+const profile = JSON.parse(await readFile(new URL('../wechat-adapters/4.1.15.13/profile.json', import.meta.url), 'utf8'));
 const evidence = JSON.parse(await readFile(new URL('./fixtures/receive-layout.json', import.meta.url), 'utf8'));
 const self = 'wxid_self';
 const base = 0x180000000n;

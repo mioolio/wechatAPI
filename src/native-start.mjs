@@ -10,9 +10,10 @@ import { NativeReadAdapter, NATIVE_READ_SCRIPT, LEGACY_NATIVE_READ_SCRIPTS } fro
 import { bootstrapNativeRead } from './native-read-bootstrap.mjs';
 import { callPersistentHost } from './native-runtime-client.mjs';
 import { WxError } from './errors.mjs';
+import { nativeCompatibility, SUPPORTED_NATIVE_VERSIONS } from './native-compat.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
-export const SUPPORTED_NATIVE_READ_VERSIONS = Object.freeze(['4.1.15.13']);
+export const SUPPORTED_NATIVE_READ_VERSIONS = SUPPORTED_NATIVE_VERSIONS;
 const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value);
 const sameHash = (left, right) => hash(left) && hash(right) && left.toLowerCase() === right.toLowerCase();
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
@@ -75,7 +76,8 @@ export async function startNativeRead(options = {}, dependencies = {}) {
   const info = await (dependencies.doctorImpl ?? doctor)({ installPath: options.installPath ?? options['install-path'], pid: options.pid, configPath: options.configPath, includeHashes: true, includeExports: false, inspectProcesses: true });
   if (info.architecture !== 'x64' || info.diagnostics?.some(row => ['VERSION_MISMATCH', 'ARCHITECTURE_MISMATCH'].includes(row.code))) throw fail('E_NATIVE_VERSION', '微信安装版本或架构诊断阻止原生启动。');
   if (!SUPPORTED_NATIVE_READ_VERSIONS.includes(info.version)) throw fail('E_NATIVE_VERSION_UNSUPPORTED', '当前微信版本尚未实现经过验证的原生读取 ABI；请使用受支持版本或其它读取后端。', { version: info.version });
-  const profileFile = resolve(options.profileFile ?? options.profile ?? resolve(workspace, 'profiles', `${info.version}.json`));
+  const compatibility = nativeCompatibility(info.version);
+  const profileFile = resolve(options.profileFile ?? options.profile ?? resolve(workspace, compatibility.profilePath));
   let profile;
   try { profile = await read(profileFile); }
   catch { throw fail('E_NATIVE_VERSION_UNSUPPORTED', '未找到当前微信版本的可验证原生 profile。', { version: info.version }); }
@@ -94,7 +96,7 @@ export async function startNativeRead(options = {}, dependencies = {}) {
     if (!main.length) throw fail(candidates.length ? 'E_NATIVE_PID_REQUIRED' : 'E_WEIXIN_NOT_RUNNING', candidates.length ? '无法证明唯一主进程，请使用 --pid 明确选择。' : '微信尚未运行，请先打开并登录微信。');
     pid = main[0].pid;
   }
-  const source = await (dependencies.readSourceImpl ?? readAgentSource)(resolve(workspace, 'agents/read-native.js'));
+  const source = await (dependencies.readSourceImpl ?? readAgentSource)(resolve(workspace, compatibility.readAgent));
   if (typeof source !== 'string' || Buffer.byteLength(source) > 1024 * 1024) throw fail('E_NATIVE_READ_SOURCE', '原生读取 agent 源码无效或超过 1 MiB。');
   const sourceSha256 = createHash('sha256').update(source, 'utf8').digest('hex');
   const metadataCall = request => {
@@ -141,7 +143,7 @@ export async function startNativeRead(options = {}, dependencies = {}) {
       return;
     }
     const prior = Array.isArray(host.scripts) ? host.scripts.filter(row => LEGACY_NATIVE_READ_SCRIPTS.some(legacy => legacy.name === row.name)) : [];
-    if (prior.length !== 1 || prior[0].loaded !== true || prior[0].destroyed !== false || !sameHash(prior[0].sourceSha256, LEGACY_NATIVE_READ_SCRIPTS.find(row => row.name === prior[0].name)?.sourceSha256)) throw fail('E_NATIVE_HOST_NOT_READY', '已有宿主没有来源与状态可验证的读取脚本；不会覆盖或重新 attach。');
+    if (!compatibility.allowLegacyReadScripts || prior.length !== 1 || prior[0].loaded !== true || prior[0].destroyed !== false || !sameHash(prior[0].sourceSha256, LEGACY_NATIVE_READ_SCRIPTS.find(row => row.name === prior[0].name)?.sourceSha256)) throw fail('E_NATIVE_HOST_NOT_READY', '已有宿主没有来源与状态可验证的读取脚本；不会覆盖或重新 attach。');
     // bootstrap verifies the legacy agent is idle before loading the new name. It stays loaded.
   }
   async function claimLock() {

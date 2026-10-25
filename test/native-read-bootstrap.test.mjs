@@ -28,7 +28,7 @@ function fixture(changes = {}) {
       calls.push(request);
       if (changes.call) return changes.call(request, { host, runtime, account, contacts, history });
       if (request.method === 'status') return { success: true, result: host };
-      if (request.method === 'load') return { success: true, result: { name: NATIVE_READ_SCRIPT, path: 'C:/mock-workspace/agents/read-native.js', loaded: true, sourceSha256, ...changes.loaded } };
+      if (request.method === 'load') return { success: true, result: { name: NATIVE_READ_SCRIPT, path: 'C:/mock-workspace/wechat-adapters/4.1.15.13/read-agent.js', loaded: true, sourceSha256, ...changes.loaded } };
       assert.equal(request.method, 'rpc');
       if (request.args.name === LEGACY_NATIVE_READ_SCRIPTS[0].name) return { success: true, result: { ...runtime, generation, ...changes.legacyRuntime } };
       assert.equal(request.args.name, NATIVE_READ_SCRIPT);
@@ -66,11 +66,28 @@ test('read bootstrap loads the exact source, binds metadata and verifies one sel
   assert.equal(result.automaticMessagesSent, 0);
   assert.deepEqual(result.historyValidation, { to: self, limit: 1 });
   assert.deepEqual(operations(fx.calls), [['status', undefined], ['load', undefined], ['rpc', 'inspect'], ['rpc', 'prepare'], ['rpc', 'account'], ['rpc', 'contacts'], ['rpc', 'history'], ['rpc', 'inspect']]);
-  assert.deepEqual(fx.calls[1].args, { name: NATIVE_READ_SCRIPT, path: 'agents/read-native.js' });
+  assert.deepEqual(fx.calls[1].args, { name: NATIVE_READ_SCRIPT, path: 'wechat-adapters/4.1.15.13/read-agent.js' });
   assert.deepEqual(fx.calls[3].args.params, [{ pid: 1234, generation, dllSha256: sha }]);
   assert.deepEqual(fx.calls[6].args.params, [{ to: self, limit: 1 }]);
-  assert.match(fx.sourceReads[0], /[\\/]agents[\\/]read-native\.js$/);
+  assert.match(fx.sourceReads[0], /[\\/]wechat-adapters[\\/]4\.1\.15\.13[\\/]read-agent\.js$/);
   assert.equal(fx.calls.some(row => ['attach', 'detach', 'unload', 'sendText'].includes(row.args?.method ?? row.method)), false);
+});
+
+test('4.2 read bootstrap selects its own source and refuses cross-binary profile or legacy scripts', async () => {
+  const version = '4.2.0.7';
+  const changes = { descriptor: { version }, host: { version }, profile: { version }, runtime: { version } };
+  const fx = fixture(changes);
+  const result = await bootstrapNativeRead(fx.options, fx.dependencies);
+  assert.equal(result.version, version);
+  assert.equal(result.ready, true);
+  assert.match(fx.sourceReads[0], /[\\/]wechat-adapters[\\/]4\.2\.0\.7[\\/]read-agent\.js$/);
+  assert.deepEqual(fx.calls[1].args, { name: NATIVE_READ_SCRIPT, path: 'wechat-adapters/4.2.0.7/read-agent.js' });
+  const mismatch = fixture({ ...changes, profile: { version, dllSha256: 'c'.repeat(64) } });
+  await assert.rejects(bootstrapNativeRead(mismatch.options, mismatch.dependencies), { code: 'E_NATIVE_READ_HASH' });
+  assert.equal(mismatch.calls.some(row => row.method === 'load'), false);
+  const legacy = fixture({ ...changes, host: { version, scripts: [{ ...LEGACY_NATIVE_READ_SCRIPTS[0], loaded: true, destroyed: false }] } });
+  await assert.rejects(bootstrapNativeRead(legacy.options, legacy.dependencies), { code: 'E_NATIVE_READ_SOURCE' });
+  assert.equal(legacy.calls.some(row => row.method === 'load'), false);
 });
 
 test('a matching prepared script is reused without replacement and still verifies real read RPCs', async () => {

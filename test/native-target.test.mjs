@@ -118,7 +118,7 @@ test('adapter configure rejects a read account switch before saving', async () =
   assert.equal(saves, 0);
 });
 
-const agentSource = await readFile(new URL('../agents/send-native.js', import.meta.url), 'utf8');
+const agentSource = await readFile(new URL('../wechat-adapters/4.1.15.13/send-agent.js', import.meta.url), 'utf8');
 const verifiedAgentHash = '10f8e995453e2da46d4f2b5080cd6da1f13cc5147746adc119ceae38cb039de5';
 async function mockedAgent({ queueImpl = callback => Promise.resolve(callback(() => false)), lookupSelf = self } = {}) {
   const lookups = [], nativeCalls = [];

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 
-const agentSource = await readFile(new URL('../agents/send-native.js', import.meta.url), 'utf8');
+const agentSource = await readFile(new URL('../wechat-adapters/4.1.15.13/send-agent.js', import.meta.url), 'utf8');
 // The original research fragment used the wrong service container and was withdrawn.
 // Exercise the production implementation, never silently fall back to that fragment.
 assert.ok(agentSource.includes('function cachedContacts('));

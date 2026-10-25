@@ -21,7 +21,7 @@
 
 ### 第一步：进入程序目录，准备读取
 
-先正常打开微信，登录自己的账号。当前原生适配是 Windows x64、Node.js 24+、微信 4.1.15.13 x64，并且 DLL 指纹必须匹配；安装条件见 [README](../README.md)。
+先正常打开微信，登录自己的账号。当前原生账号、联系人、历史及文字和图片适配支持 Windows x64、Node.js 24+、微信 4.1.15.13 或 4.2.0.7 x64，并且 DLL 指纹必须匹配对应的 `wechat-adapters/<微信版本>/profile.json`；安装条件见 [README](../README.md)。
 
 打开 PowerShell，输入程序文件夹的真实路径：
 

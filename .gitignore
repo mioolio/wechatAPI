@@ -6,3 +6,12 @@ dist/
 *.log
 agents/*-probe.js
 agents/send-stage-observer.js
+
+# Local credentials, personal configuration and exported workspaces
+.env
+.env.*
+!.env.example
+.npmrc
+wxcc.apifox.json
+*.zip
+*.zip.sha256

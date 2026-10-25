@@ -54,6 +54,45 @@ test('bootstrap loads and prepares the fixed agent without sending or manufactur
   assert.equal(Object.hasOwn(config, 'validatedBinarySha256'), false);
   assert.deepEqual(fx.saves[0].binding, { pid: 1234, generation, self, chatId: id, sessionId: id, displayName: '合成联系人', version: target.version, dllSha256: sha });
 });
+
+test('4.2 source selection does not manufacture or borrow old send/image evidence', async () => {
+  const version = '4.2.0.7';
+  const changes = { host: { version }, profile: { version }, target: { version } };
+  for (const records of [{}, { nativeSendValidation: evidence, nativeImageSendValidation: { ...evidence, entryRva: '0x2ba7a20' } }]) {
+    const fx = fixture({ ...changes, profile: { version, ...records } });
+    const result = await bootstrapNativeSend(fx.options, fx.deps);
+    assert.equal(result.ready, false);
+    assert.equal(result.priorBinaryValidation, false);
+    assert.equal(result.priorImageValidation, false);
+    assert.equal(result.imageSendAvailable, false);
+    assert.match(fx.sourceReads[0], /[\\/]wechat-adapters[\\/]4\.2\.0\.7[\\/]send-agent\.js$/);
+    assert.equal(fx.calls[1].args.path, 'wechat-adapters/4.2.0.7/send-agent.js');
+    const config = fx.calls.find(row => row.args?.method === 'prepare').args.params[0];
+    assert.equal(Object.hasOwn(config, 'validatedBinarySha256'), false);
+    assert.equal(Object.hasOwn(config, 'validatedImageBinarySha256'), false);
+    assert.equal(Object.hasOwn(fx.saves[0].binding, 'validatedBinarySha256'), false);
+    assert.equal(fx.calls.some(row => ['sendText', 'prepareImage', 'sendImage'].includes(row.args?.method)), false);
+  }
+  const mismatch = fixture({ ...changes, profile: { version, dllSha256: 'c'.repeat(64) } });
+  await assert.rejects(bootstrapNativeSend(mismatch.options, mismatch.deps), { code: 'E_NATIVE_HASH' });
+  assert.equal(mismatch.calls.some(row => row.method === 'load'), false);
+});
+
+test('4.2 recorded validation requires its own native entry, version and exact binary', () => {
+  const version = '4.2.0.7';
+  const host = { version, dllSha256: sha };
+  const text = { ...evidence, version, entryRva: '0x570db60' };
+  const image = { ...evidence, version, entryRva: '0x2c7ddd0' };
+  const profile = { version, dllSha256: sha, nativeSendValidation: text, nativeImageSendValidation: image };
+  assert.equal(hasPriorNativeValidation(profile, host), true);
+  assert.equal(hasPriorNativeImageValidation(profile, host), true);
+  for (const changes of [{ dllSha256: 'c'.repeat(64) }, { version: '4.1.15.13' }, { nativeSendValidation: { ...text, entryRva: '0x54b02f0' } }, { nativeSendValidation: { ...text, status: 'unknown' } }]) {
+    assert.equal(hasPriorNativeValidation({ ...profile, ...changes }, host), false);
+  }
+  assert.equal(hasPriorNativeImageValidation({ ...profile, nativeImageSendValidation: { ...image, entryRva: '0x2ba7a20' } }, host), false);
+  assert.equal(hasPriorNativeImageValidation(profile, { ...host, dllSha256: 'c'.repeat(64) }), false);
+  assert.equal(hasPriorContactValidation({ ...profile, nativeContactCacheValidation: { version } }, host, sourceSha), false);
+});
 test('only matching recorded accepted evidence restores a validated binary flag', async () => {
   const fx = fixture({ profile: { nativeSendValidation: evidence } });
   const result = await bootstrapNativeSend(fx.options, fx.deps);
@@ -81,7 +120,7 @@ test('a valid already bound agent is reused without load, prepare, unload or det
   assert.deepEqual(fx.calls.map(call => [call.method, call.args?.method]), [['status', undefined], ['rpc', 'inspect']]);
   assert.equal(fx.saves.length, 1);
   assert.equal(fx.sourceReads.length, 1);
-  assert.match(fx.sourceReads[0], /agents[\\/]send-native\.js$/);
+  assert.match(fx.sourceReads[0], /wechat-adapters[\\/]4\.1\.15\.13[\\/]send-agent\.js$/);
 });
 
 test('changed local source or missing loaded source hash refuses reuse before any agent RPC', async () => {

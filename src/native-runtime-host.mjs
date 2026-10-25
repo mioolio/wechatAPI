@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { doctor as inspectInstallation } from './doctor.mjs';
 import { createPrivacyFormatter } from './privacy.mjs';
+import { nativeCompatibility, NATIVE_AGENT_PATHS } from './native-compat.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
 const MAX_BODY = 1024 * 1024;
@@ -27,12 +28,19 @@ function scriptName(value) {
   return value;
 }
 export async function agentPath(workspace, value) {
-  if (typeof value !== 'string' || !value || !/\.(?:js|mjs)$/.test(value)) throw failure('E_AGENT_PATH', 'Only workspace agents/*.js or *.mjs files are permitted');
+  if (typeof value !== 'string' || !value || !/\.(?:js|mjs)$/.test(value)) throw failure('E_AGENT_PATH', 'Only public agents and registered version agents are permitted');
   const root = await realpath(workspace);
+  const requested = resolve(workspace, value);
+  const requestedRelative = relative(root, requested).split(sep).join('/');
+  if (NATIVE_AGENT_PATHS.includes(requestedRelative)) {
+    const target = await realpath(requested);
+    if (normalizePath(target) !== normalizePath(requested)) throw failure('E_AGENT_PATH', 'Registered version agent resolves through a redirected path');
+    return target;
+  }
   const agents = await realpath(resolve(workspace, 'agents'));
   const agentsRelative = relative(root, agents);
   if (!agentsRelative || isAbsolute(agentsRelative) || agentsRelative === '..' || agentsRelative.startsWith(`..${sep}`)) throw failure('E_AGENT_PATH', 'The agents directory resolves outside the workspace');
-  const target = await realpath(resolve(workspace, value));
+  const target = await realpath(requested);
   const rel = relative(agents, target);
   if (!rel || isAbsolute(rel) || rel === '..' || rel.startsWith(`..${sep}`)) throw failure('E_AGENT_PATH', 'Agent path is outside the workspace agents directory');
   return target;
@@ -41,7 +49,9 @@ export async function validateInstallation({ pid, workspace = WORKSPACE, profile
   if (!Number.isSafeInteger(pid) || pid <= 0) throw failure('E_PID', '--pid must explicitly identify a positive Weixin PID');
   const info = await doctor({ installPath, includeHashes: true, includeExports: false, inspectProcesses: true });
   if (!info.processInspectionAvailable || !info.processes.some(p => p.pid === pid && normalizePath(p.path) === normalizePath(info.exe.path))) throw failure('E_PID', 'PID does not match the verified Weixin installation');
-  const trusted = JSON.parse(await readFile(profile ?? resolve(workspace, 'profiles', `${info.version}.json`), 'utf8'));
+  const compatibility = nativeCompatibility(info.version);
+  if (!profile && !compatibility) throw failure('E_NATIVE_VERSION_UNSUPPORTED', 'No registered native adapter exists for this version');
+  const trusted = JSON.parse(await readFile(profile ?? resolve(workspace, compatibility.profilePath), 'utf8'));
   if (info.diagnostics.some(d => ['VERSION_MISMATCH', 'ARCHITECTURE_MISMATCH'].includes(d.code))) throw failure('E_VERSION', 'Installation version/architecture diagnostics prevent attachment');
   if (trusted.version !== info.version || trusted.architecture !== info.architecture || info.architecture !== 'x64') throw failure('E_PROFILE', 'Installed version and architecture must exactly match the profile');
   if (!/^[0-9a-f]{64}$/i.test(trusted.dllSha256 ?? '') || trusted.dllSha256.toLowerCase() !== info.hashes.dll.toLowerCase()) throw failure('E_HASH', 'Weixin.dll SHA-256 does not match the static profile');
@@ -73,7 +83,24 @@ export async function createPersistentHost(options, deps = {}) {
   }
   function event(kind, details) { void record(kind, details).catch(() => { state.logError = 'E_EVENT_LOG'; }); }
   const scripts = new Map();
+  // Only successful, source-pinned native reads may release their request ID.
+  // Arbitrary RPCs and every uncertain outcome retain their original replay guard.
   const requests = new Map();
+  const readRequests = new Map();
+  const requestLedgerLimit = deps.requestLedgerLimit ?? 10000;
+  if (!Number.isSafeInteger(requestLedgerLimit) || requestLedgerLimit < 1 || requestLedgerLimit > 10000) throw failure('E_REQUEST_LIMIT_VALUE', 'Request ledger limit must be 1–10000');
+  const trustedReadScripts = new Map();
+  const compatibility = nativeCompatibility(info.version);
+  for (const [name, path, methods] of compatibility ? [
+    ['readnative_live5', compatibility.readAgent, ['inspect', 'account', 'contacts', 'history']],
+    ['sendnative_live5', compatibility.sendAgent, ['inspect', 'contacts']],
+  ] : []) {
+    try {
+      const file = await agentPath(workspace, path);
+      const source = await readFile(file, 'utf8');
+      if (Buffer.byteLength(source) <= MAX_BODY) trustedReadScripts.set(name, { path: file, sourceSha256: createHash('sha256').update(source, 'utf8').digest('hex'), methods: new Set(methods) });
+    } catch { /* Missing/unreadable/untrusted sources never qualify for the read lane. */ }
+  }
   let frida;
   let session;
   let releaseStartup;
@@ -82,7 +109,16 @@ export async function createPersistentHost(options, deps = {}) {
   let resolveClosed;
   const closed = new Promise(resolveDone => { resolveClosed = resolveDone; });
   function snapshot() {
-    return { ...state, scripts: [...scripts].map(([name, value]) => ({ name, path: value.path, sourceSha256: value.sourceSha256, loaded: value.loaded, destroyed: value.script.isDestroyed })), unknownRequests: [...requests].filter(([, value]) => value.status === 'unknown').map(([requestId]) => requestId) };
+    const unknownRequests = [...requests, ...readRequests].filter(([, value]) => value.status === 'unknown').map(([requestId]) => requestId);
+    return { ...state, scripts: [...scripts].map(([name, value]) => ({ name, path: value.path, sourceSha256: value.sourceSha256, loaded: value.loaded, destroyed: value.script.isDestroyed })), unknownRequests,
+      requestLedger: { limit: requestLedgerLimit, retained: requests.size, readOnlyLimit: requestLedgerLimit, readOnlyRetained: readRequests.size, unknown: unknownRequests.length } };
+  }
+  function isTrustedRead(method, args) {
+    if (method !== 'rpc' || typeof args.name !== 'string' || !Array.isArray(args.params ?? [])) return false;
+    const trusted = trustedReadScripts.get(args.name);
+    const loaded = scripts.get(args.name);
+    return Boolean(trusted && trusted.methods.has(args.method) && loaded?.loaded === true && !loaded.script.isDestroyed
+      && loaded.path === trusted.path && loaded.sourceSha256 === trusted.sourceSha256);
   }
   async function operation(fn) {
     const cancellable = new frida.Cancellable();
@@ -125,22 +161,29 @@ export async function createPersistentHost(options, deps = {}) {
   async function command(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw failure('E_BODY', 'A JSON object is required');
     const id = normalizeId(body.requestId);
-    if (requests.has(id)) throw failure('E_REQUEST_DUPLICATE', 'requestId already exists; use status with args.requestId to inspect its state');
-    if (requests.size >= 10000) throw failure('E_REQUEST_LIMIT', 'Request ledger is full; no entries are silently evicted');
+    if (requests.has(id) || readRequests.has(id)) throw failure('E_REQUEST_DUPLICATE', 'requestId already exists; use status with args.requestId to inspect its state');
     const method = body.method;
     const args = body.args ?? {};
     if (typeof args !== 'object' || !args || Array.isArray(args)) throw failure('E_ARGS', 'args must be an object');
+    // Host metadata never enters the target and remains available when a ledger
+    // is full. A status request still cannot reuse a protected operation's ID.
+    if (method === 'status') {
+      if (stopped) throw failure('E_STOPPED', 'Host is stopped');
+      const lookup = args.requestId ? normalizeId(args.requestId) : null;
+      const result = lookup ? { requestId: lookup, request: requests.get(lookup) ?? readRequests.get(lookup) ?? null, host: snapshot() } : snapshot();
+      return { success: true, requestId: id, result };
+    }
+    const readOnly = isTrustedRead(method, args);
+    const ledger = readOnly ? readRequests : requests;
+    if (ledger.size >= requestLedgerLimit) throw failure('E_REQUEST_LIMIT', 'Request ledger is full; no protected or unknown entries are silently evicted');
     const pending = { status: 'queued', method, createdAt: new Date().toISOString() };
-    requests.set(id, pending);
+    ledger.set(id, pending);
     let enteredRpc = false;
     try {
       pending.status = 'executing';
       if (stopped) throw failure('E_STOPPED', 'Host is stopped');
       let result;
-      if (method === 'status') {
-        const lookup = args.requestId ? normalizeId(args.requestId) : null;
-        result = lookup ? { requestId: lookup, request: requests.get(lookup) ?? null, host: snapshot() } : snapshot();
-      } else if (method === 'stop') {
+      if (method === 'stop') {
         if (state.attached) throw failure('E_ATTACHED_STOP', 'Explicitly detach first. stop never unloads or detaches a live Frida session.');
         stopped = true;
         state.status = 'stopped';
@@ -190,6 +233,7 @@ export async function createPersistentHost(options, deps = {}) {
       }
       pending.status = 'complete';
       pending.completedAt = new Date().toISOString();
+      if (readOnly) ledger.delete(id);
       // Retain status metadata, not possibly sensitive arbitrary RPC result bodies.
       return { success: true, requestId: id, result };
     } catch (error) {
@@ -206,7 +250,7 @@ export async function createPersistentHost(options, deps = {}) {
     const expected = Buffer.from(token);
     return bytes.length === expected.length && timingSafeEqual(bytes, expected);
   }
-  const server = createServer(async (req, res) => {
+  const server = (deps.createServer ?? createServer)(async (req, res) => {
     function respond(status, value) { if (res.destroyed) return; res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(JSON.stringify(value)); }
     if (!authenticated(req)) { req.resume(); respond(401, { success: false, error: { code: 'E_AUTH', message: 'A valid TokenHeader is required' } }); return; }
     if (req.method !== 'POST' || req.url !== '/command') { req.resume(); respond(404, { success: false, error: { code: 'E_ENDPOINT', message: 'POST /command only' } }); return; }

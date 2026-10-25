@@ -7,6 +7,7 @@ import { NATIVE_SEND_SCRIPT, requireContactSnapshot } from './native-send-adapte
 import { WxError } from './errors.mjs';
 import { createPrivacyFormatter } from './privacy.mjs';
 import { DEFAULT_NATIVE_TARGET_FILE, requireNativeTarget } from './native-target.mjs';
+import { nativeCompatibility } from './native-compat.mjs';
 
 const WORKSPACE = fileURLToPath(new URL('../', import.meta.url));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -30,28 +31,31 @@ async function saveBinding(path, binding) {
 }
 export function hasPriorNativeValidation(profile, host) {
   const evidence = profile?.nativeSendValidation;
-  return Boolean(evidence && profile.version === host.version && /^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') && profile.dllSha256?.toLowerCase() === host.dllSha256.toLowerCase()
+  const compatibility = nativeCompatibility(host?.version);
+  return Boolean(compatibility && evidence && profile.version === host.version && /^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') && profile.dllSha256?.toLowerCase() === host.dllSha256.toLowerCase()
     && evidence.dllSha256?.toLowerCase() === host.dllSha256.toLowerCase() && evidence.status === 'accepted'
-    && evidence.version === host.version && evidence.nativeEntryCalled === true && evidence.entryRva === '0x54b02f0'
+    && evidence.version === host.version && evidence.nativeEntryCalled === true && evidence.entryRva === compatibility.textEntryRva
     && typeof evidence.verifiedAt === 'string' && Number.isFinite(Date.parse(evidence.verifiedAt))
     && typeof evidence.requestId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(evidence.requestId));
 }
 export function hasPriorNativeImageValidation(profile, host) {
   const evidence = profile?.nativeImageSendValidation;
-  return Boolean(evidence && profile.version === host.version && isHash(host.dllSha256)
+  const compatibility = nativeCompatibility(host?.version);
+  return Boolean(compatibility && evidence && profile.version === host.version && isHash(host.dllSha256)
     && sameHash(profile.dllSha256, host.dllSha256) && sameHash(evidence.dllSha256, host.dllSha256)
-    && evidence.version === host.version && evidence.entryRva === '0x2ba7a20'
+    && evidence.version === host.version && evidence.entryRva === compatibility.imageEntryRva
     && evidence.status === 'accepted' && evidence.nativeEntryCalled === true
     && typeof evidence.verifiedAt === 'string' && Number.isFinite(Date.parse(evidence.verifiedAt))
     && typeof evidence.requestId === 'string' && /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(evidence.requestId));
 }
 export function hasPriorContactValidation(profile, host, sourceSha256) {
   const evidence = profile?.nativeContactCacheValidation;
-  return Boolean(evidence && profile.version === host.version && /^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') && /^[a-f0-9]{64}$/i.test(sourceSha256 ?? '')
+  const expected = nativeCompatibility(host?.version)?.contactEvidence;
+  return Boolean(expected && evidence && profile.version === host.version && /^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') && /^[a-f0-9]{64}$/i.test(sourceSha256 ?? '')
     && profile.dllSha256?.toLowerCase() === host.dllSha256.toLowerCase() && evidence.dllSha256?.toLowerCase() === host.dllSha256.toLowerCase()
     && evidence.agentSourceSha256?.toLowerCase() === sourceSha256.toLowerCase() && evidence.version === host.version
     && evidence.native === true && evidence.scope === 'loaded-contact-cache' && evidence.complete === false && evidence.cacheSnapshotComplete === true
-    && evidence.registryGetterRva === '0x36c7b0' && evidence.storeGetterRva === '0x6dcf80' && evidence.accountVtableRva === '0x8dfe2f8' && evidence.cacheCenterVtableRva === '0x8f9bf98'
+    && Object.entries(expected).every(([field, value]) => evidence[field] === value)
     && Number.isSafeInteger(evidence.count) && evidence.count > 0 && evidence.count <= 4096
     && typeof evidence.verifiedAt === 'string' && Number.isFinite(Date.parse(evidence.verifiedAt)));
 }
@@ -79,17 +83,19 @@ export async function bootstrapNativeSend({ workspace = WORKSPACE, tokenFile = r
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (previousBinding?.pid === host.pid && previousBinding?.generation === host.generation && previousBinding.runtimeBlocked) throw new WxError('E_NATIVE_RUNTIME_BLOCKED', '本次运行仍有阻塞任务；初始化不会清除阻塞标记。需微信和宿主重新启动后建立新的运行代次。');
   if (previousBinding?.pid === host.pid && previousBinding?.generation === host.generation && (previousBinding.self !== target.self || previousBinding.chatId !== target.chatId || previousBinding.displayName !== target.displayName)) throw new WxError('E_NATIVE_TARGET_CHANGED', '本次运行代次已有其他账号或目标绑定；新授权需要新的发送宿主代次。');
-  const profile = await read(profileFile ?? resolve(workspace, 'profiles', `${host.version}.json`));
+  const compatibility = nativeCompatibility(host.version);
+  if (!compatibility) throw new WxError('E_NATIVE_VERSION_UNSUPPORTED', '当前版本没有原生发送 agent。');
+  const profile = await read(profileFile ?? resolve(workspace, compatibility.profilePath));
   if (profile?.version !== host.version || !/^[a-f0-9]{64}$/i.test(host.dllSha256 ?? '') || profile?.dllSha256?.toLowerCase() !== host.dllSha256.toLowerCase()) throw new WxError('E_NATIVE_HASH', '启动时已验证的 DLL SHA-256 与当前版本 profile 不一致。');
   if (target.version !== host.version || target.dllSha256 !== host.dllSha256.toLowerCase()) throw new WxError('E_NATIVE_TARGET_BINARY', '目标授权的客户端版本或 DLL 与当前已验证二进制不一致；重新读取并配置目标。');
-  const source = await readAgent(resolve(workspace, 'agents/send-native.js'));
+  const source = await readAgent(resolve(workspace, compatibility.sendAgent));
   if (typeof source !== 'string' || Buffer.byteLength(source, 'utf8') > 1024 * 1024) throw new WxError('E_NATIVE_SOURCE', '发送 agent 源码格式或大小无效。');
   const sourceSha256 = createHash('sha256').update(source, 'utf8').digest('hex');
   if (!Array.isArray(host.scripts)) throw new WxError('E_NATIVE_SCRIPT_STATE', '宿主未提供可验证的已加载脚本列表。');
   const existing = host.scripts.filter(script => script.name === NATIVE_SEND_SCRIPT);
   if (existing.length > 1 || (existing.length === 1 && (existing[0].loaded !== true || existing[0].destroyed !== false))) throw new WxError('E_NATIVE_SCRIPT_STATE', '指定脚本名已存在但失效；不会自动卸载或覆盖。');
   if (existing.length && !sameHash(existing[0].sourceSha256, sourceSha256)) throw new WxError('E_NATIVE_SOURCE', '同名已加载脚本与当前 send-native.js 源哈希不一致；不会覆盖或卸载。');
-  const agent = existing[0] ?? await invoke('load', { name: NATIVE_SEND_SCRIPT, path: 'agents/send-native.js' });
+  const agent = existing[0] ?? await invoke('load', { name: NATIVE_SEND_SCRIPT, path: compatibility.sendAgent });
   if (!agent || agent.name !== NATIVE_SEND_SCRIPT || agent.loaded !== true || agent.destroyed === true || !sameHash(agent.sourceSha256, sourceSha256)) throw new WxError('E_NATIVE_SOURCE', '实际加载的发送脚本与当前源哈希或名称不匹配。');
   let runtime = await invoke('rpc', { name: NATIVE_SEND_SCRIPT, method: 'inspect', params: [] });
   const priorValidated = hasPriorNativeValidation(profile, host);

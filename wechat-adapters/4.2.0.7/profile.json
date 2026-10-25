@@ -1,0 +1,38 @@
+{
+  "version": "4.2.0.7",
+  "architecture": "x64",
+  "dllSha256": "9beb1051449e768417d770915646815a5bd1899cc2779f758069820794358ee0",
+  "receiveValidated": false,
+  "compatibilityStatus": "native account/contact/history reads and filehelper text/image sends verified on 4.2.0.7",
+  "nativeSendValidation": {
+    "dllSha256": "9beb1051449e768417d770915646815a5bd1899cc2779f758069820794358ee0",
+    "version": "4.2.0.7",
+    "status": "accepted",
+    "nativeEntryCalled": true,
+    "entryRva": "0x570db60",
+    "verifiedAt": "2026-10-25T09:54:33.447Z",
+    "requestId": "binary-text-abi-validation",
+    "requestIdRedacted": true,
+    "evidence": "Verified on this exact DLL using File Transfer Assistant and independent native history readback. This validates the binary ABI and does not authorize a target."
+  },
+  "nativeImageSendValidation": {
+    "dllSha256": "9beb1051449e768417d770915646815a5bd1899cc2779f758069820794358ee0",
+    "version": "4.2.0.7",
+    "status": "accepted",
+    "nativeEntryCalled": true,
+    "entryRva": "0x2c7ddd0",
+    "verifiedAt": "2026-10-25T09:56:27.643Z",
+    "requestId": "binary-image-abi-validation",
+    "requestIdRedacted": true,
+    "evidence": "Verified on this exact DLL using File Transfer Assistant and independent native history readback. This validates the binary ABI and does not authorize a target."
+  },
+  "nativeReadValidation": {
+    "version": "4.2.0.7",
+    "dllSha256": "9beb1051449e768417d770915646815a5bd1899cc2779f758069820794358ee0",
+    "verifiedAt": "2026-10-25T09:54:00.000Z",
+    "account": true,
+    "contacts": true,
+    "history": true,
+    "imageXml": true
+  }
+}
